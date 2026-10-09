@@ -18,6 +18,7 @@ using namespace std::literals;
 #include "Exporter.h"
 #include "AudioEditor.h"
 #include "Popups.h"
+#include "UntitledTests.h"
 
 #if JUCE_MAC
  #include <mach/mach.h>
@@ -1206,6 +1207,24 @@ public:
             effectPanels[1]->setTopLeftPosition (700, 20);
     }
 
+    // --open-fx us_eq,us_limiter: those effects on insert 1, windows tiled.
+    void debugOpenEffects (const juce::StringArray& types)
+    {
+        channelRackPanel->setVisible (false);
+        int x = 4, y = 4, rowH = 0;
+        for (auto& type : types)
+            if (auto p = studio.addEffect (1, type))
+            {
+                Presets::applyValues (*p, Presets::factory (type).size() > 1 ? Presets::factory (type)[1].values : Presets::Values {});
+                openEffectWindow (*p);
+                auto* panel = effectPanels.getLast();
+                if (x + panel->getWidth() > workspace.getWidth() && x > 4) { x = 4; y += rowH + 4; rowH = 0; }
+                panel->setTopLeftPosition (x, y);
+                x += panel->getWidth() + 4;
+                rowH = juce::jmax (rowH, panel->getHeight());
+            }
+    }
+
     void debugDemoSong()
     {
         const int p1 = studio.getCurrentPattern();
@@ -1418,6 +1437,8 @@ namespace SelfTest
             s.setChannelInsert (kick, 3);
         }
 
+        ok &= UntitledTests::run (s, check);
+
         {
             // Every catalog effect loads; presets change parameters.
             int created = 0;
@@ -1533,6 +1554,26 @@ namespace SelfTest
                 ok &= check (buffer.getMagnitude (0, buffer.getNumSamples()) > 0.01f, "mixdown contains audio");
                 ok &= check (std::abs ((double) reader->lengthInSamples / reader->sampleRate - (s.getPatternLengthBeats (s.getCurrentPatternState()) * 60.0 / s.getBpm() + 0.5)) < 0.1,
                              "mixdown length = pattern + tail");
+            }
+
+            if (auto lim = s.addEffect (0, UFX::LimiterPlugin::xmlTypeName))
+            {
+                // An Untitled effect in the real render graph: limiter on the master (pre-fader), two ceilings 6 dB apart.
+                auto renderPeak = [&] (float ceiling)
+                {
+                    Presets::applyValues (*lim, { { "gain", 24 }, { "ceiling", ceiling } });
+                    const auto file = dir.getChildFile ("limited.wav");
+                    Exporter::exportMix (s, es, file);
+                    auto reader = std::unique_ptr<juce::AudioFormatReader> (formats.createReaderFor (file));
+                    if (reader == nullptr) return 0.0f;
+                    juce::AudioBuffer<float> buffer ((int) reader->numChannels, (int) reader->lengthInSamples);
+                    reader->read (&buffer, 0, buffer.getNumSamples(), 0, true, true);
+                    return UDsp::gainToDb (buffer.getMagnitude (0, buffer.getNumSamples()));
+                };
+                const float a = renderPeak (-6.0f), b = renderPeak (-12.0f);
+                ok &= check (std::abs (a - b - 6.0f) < 0.1f && a < -5.95f, "Untitled Limiter on the master: mixdown peak follows the ceiling ("
+                                                                             + juce::String (a, 2) + " / " + juce::String (b, 2) + " dB after the fader)");
+                s.removePlugin (*lim);
             }
             es.format = Exporter::Format::flac;
             ok &= check (Exporter::exportMix (s, es, dir.getChildFile ("mix.flac")), "export FLAC");
@@ -2410,6 +2451,14 @@ public:
             return;
         }
 
+        if (commandLine.contains ("--fx-bench"))
+        {
+            Studio studio (*engine);
+            UntitledTests::bench (studio);
+            quit();
+            return;
+        }
+
         if (commandLine.contains ("--stress"))
         {
             SelfTest::stress (*engine);
@@ -2426,6 +2475,11 @@ public:
             if (commandLine.contains ("--open-mixer"))
                 if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
                     mc->debugOpenMixer();
+
+            if (commandLine.contains ("--open-fx "))
+                if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
+                    mc->debugOpenEffects (juce::StringArray::fromTokens (commandLine.fromFirstOccurrenceOf ("--open-fx ", false, false)
+                                                                             .upToFirstOccurrenceOf (" ", false, false), ",", {}));
 
             if (commandLine.contains ("--demo-song"))
                 if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))

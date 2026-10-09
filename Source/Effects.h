@@ -4,9 +4,10 @@
 #include "Studio.h"
 #include "Analyzer.h"
 #include "AirwindowsList.h"
+#include "UntitledViews.h"
 
 // The built-in effects you can put in a mixer slot.
-// Our own names; engines are Tracktion's built-ins, bundled Airwindows (MIT) and our Analyzer.
+// Our own names; engines are our Untitled effects (listed first), Tracktion's built-ins, bundled Airwindows (MIT) and our Analyzer.
 namespace Effects
 {
     struct Entry { juce::String name, xmlType, category, hint; };
@@ -22,54 +23,63 @@ namespace Effects
         pm.createBuiltInType<MultiSamplerPlugin>();
         pm.createBuiltInType<FMSynthPlugin>();
         pm.createBuiltInType<te::ImpulseResponsePlugin>();
+        UFX::registerAll (pm);
     }
 
     inline const std::vector<Entry>& builtIn()
     {
-        static const std::vector<Entry> list {
-            { "Parametric EQ",   te::EqualiserPlugin::xmlTypeName,          "Mixing",     "4-band EQ with a draggable curve" },
-            { "Compressor",      te::CompressorPlugin::xmlTypeName,         "Mixing",     "Evens out levels; supports sidechain" },
-            { "Bus Glue",        te::AirWindowsButterComp2::xmlTypeName,    "Mixing",     "Gentle bus compressor" },
-            { "Vari-Mu",         te::AirWindowsVariMu::xmlTypeName,         "Mixing",     "Tube-style mastering compressor" },
-            { "Limiter",         te::AirWindowsADClip7::xmlTypeName,        "Mixing",     "Loudness maximizer / clipper for the master" },
-            { "Gate",            te::AirWindowsSoftGate::xmlTypeName,       "Mixing",     "Silences quiet parts" },
-            { "De-esser",        te::AirWindowsDeEss::xmlTypeName,          "Mixing",     "Tames harsh S sounds" },
-            { "Transient Shaper",te::AirWindowsPoint::xmlTypeName,          "Mixing",     "More or less punch on hits" },
-            { "Stereo Widener",  te::AirWindowsWider::xmlTypeName,          "Mixing",     "Makes the stereo image wider or narrower" },
-            { "Mid/Side",        te::AirWindowsMidSide::xmlTypeName,        "Mixing",     "Balance centre vs sides" },
-            { "Gain",            te::AirWindowsPurestGain::xmlTypeName,     "Mixing",     "Clean volume trim" },
+        static const std::vector<Entry> list = []
+        {
+            std::vector<Entry> v;
+            for (auto& u : UFX::catalog())
+                v.push_back ({ u.name, u.xmlType, u.category, u.hint });
+            const std::vector<Entry> others {
+                { "Parametric EQ",   te::EqualiserPlugin::xmlTypeName,          "Mixing",     "4-band EQ with a draggable curve" },
+                { "Compressor",      te::CompressorPlugin::xmlTypeName,         "Mixing",     "Evens out levels; supports sidechain" },
+                { "Bus Glue",        te::AirWindowsButterComp2::xmlTypeName,    "Mixing",     "Gentle bus compressor" },
+                { "Vari-Mu",         te::AirWindowsVariMu::xmlTypeName,         "Mixing",     "Tube-style mastering compressor" },
+                { "Limiter",         te::AirWindowsADClip7::xmlTypeName,        "Mixing",     "Loudness maximizer / clipper for the master" },
+                { "Gate",            te::AirWindowsSoftGate::xmlTypeName,       "Mixing",     "Silences quiet parts" },
+                { "De-esser",        te::AirWindowsDeEss::xmlTypeName,          "Mixing",     "Tames harsh S sounds" },
+                { "Transient Shaper",te::AirWindowsPoint::xmlTypeName,          "Mixing",     "More or less punch on hits" },
+                { "Stereo Widener",  te::AirWindowsWider::xmlTypeName,          "Mixing",     "Makes the stereo image wider or narrower" },
+                { "Mid/Side",        te::AirWindowsMidSide::xmlTypeName,        "Mixing",     "Balance centre vs sides" },
+                { "Gain",            te::AirWindowsPurestGain::xmlTypeName,     "Mixing",     "Clean volume trim" },
 
-            { "Reverb",          te::ReverbPlugin::xmlTypeName,             "Space",      "Room / hall reverb" },
-            { "Small Rooms",     te::AirWindowsPocketVerbs::xmlTypeName,    "Space",      "Many compact reverb types" },
-            { "Convolver",       te::ImpulseResponsePlugin::xmlTypeName,    "Space",      "Convolution reverb (generated room)" },
-            { "Delay",           te::DelayPlugin::xmlTypeName,              "Space",      "Echo delay" },
-            { "Tape Delay",      te::AirWindowsTapeDelay::xmlTypeName,      "Space",      "Warm tape echo" },
-            { "Echo",            te::AirWindowsPurestEcho::xmlTypeName,     "Space",      "Multi-tap echo" },
+                { "Reverb",          te::ReverbPlugin::xmlTypeName,             "Space",      "Room / hall reverb" },
+                { "Small Rooms",     te::AirWindowsPocketVerbs::xmlTypeName,    "Space",      "Many compact reverb types" },
+                { "Convolver",       te::ImpulseResponsePlugin::xmlTypeName,    "Space",      "Convolution reverb (generated room)" },
+                { "Delay",           te::DelayPlugin::xmlTypeName,              "Space",      "Echo delay" },
+                { "Tape Delay",      te::AirWindowsTapeDelay::xmlTypeName,      "Space",      "Warm tape echo" },
+                { "Echo",            te::AirWindowsPurestEcho::xmlTypeName,     "Space",      "Multi-tap echo" },
 
-            { "Distortion",      te::AirWindowsDrive::xmlTypeName,          "Color",      "Overdrive" },
-            { "Saturation",      te::AirWindowsDensity::xmlTypeName,        "Color",      "Thickens and warms" },
-            { "Bitcrusher",      te::AirWindowsDeRez2::xmlTypeName,         "Color",      "Lo-fi sample rate / bit reduction" },
-            { "Tape",            te::AirWindowsToTape5::xmlTypeName,        "Color",      "Tape machine saturation" },
-            { "Tube Desk",       te::AirWindowsTubeDesk::xmlTypeName,       "Color",      "Tube console colour" },
-            { "Vinyl",           te::AirWindowsToVinyl4::xmlTypeName,       "Color",      "Vinyl mastering curve" },
-            { "Enhancer",        te::AirWindowsEnergy::xmlTypeName,         "Color",      "Adds energy and presence" },
-            { "Air",             te::AirWindowsAir::xmlTypeName,            "Color",      "Top-end sparkle" },
-            { "Sub Bass",        te::AirWindowsDubSub::xmlTypeName,         "Color",      "Deepens the low end" },
+                { "Distortion",      te::AirWindowsDrive::xmlTypeName,          "Color",      "Overdrive" },
+                { "Saturation",      te::AirWindowsDensity::xmlTypeName,        "Color",      "Thickens and warms" },
+                { "Bitcrusher",      te::AirWindowsDeRez2::xmlTypeName,         "Color",      "Lo-fi sample rate / bit reduction" },
+                { "Tape",            te::AirWindowsToTape5::xmlTypeName,        "Color",      "Tape machine saturation" },
+                { "Tube Desk",       te::AirWindowsTubeDesk::xmlTypeName,       "Color",      "Tube console colour" },
+                { "Vinyl",           te::AirWindowsToVinyl4::xmlTypeName,       "Color",      "Vinyl mastering curve" },
+                { "Enhancer",        te::AirWindowsEnergy::xmlTypeName,         "Color",      "Adds energy and presence" },
+                { "Air",             te::AirWindowsAir::xmlTypeName,            "Color",      "Top-end sparkle" },
+                { "Sub Bass",        te::AirWindowsDubSub::xmlTypeName,         "Color",      "Deepens the low end" },
 
-            { "Chorus",          te::ChorusPlugin::xmlTypeName,             "Modulation", "Classic chorus" },
-            { "Ensemble",        te::AirWindowsChorusEnsemble::xmlTypeName, "Modulation", "Rich multi-voice chorus" },
-            { "Phaser",          te::PhaserPlugin::xmlTypeName,             "Modulation", "Sweeping phaser" },
-            { "Tremolo",         te::AirWindowsTremolo::xmlTypeName,        "Modulation", "Volume wobble" },
-            { "Vibrato",         te::AirWindowsVibrato::xmlTypeName,        "Modulation", "Pitch wobble" },
+                { "Chorus",          te::ChorusPlugin::xmlTypeName,             "Modulation", "Classic chorus" },
+                { "Ensemble",        te::AirWindowsChorusEnsemble::xmlTypeName, "Modulation", "Rich multi-voice chorus" },
+                { "Phaser",          te::PhaserPlugin::xmlTypeName,             "Modulation", "Sweeping phaser" },
+                { "Tremolo",         te::AirWindowsTremolo::xmlTypeName,        "Modulation", "Volume wobble" },
+                { "Vibrato",         te::AirWindowsVibrato::xmlTypeName,        "Modulation", "Pitch wobble" },
 
-            { "Filter",          te::LowPassPlugin::xmlTypeName,            "Filter",     "Low-pass / high-pass filter" },
-            { "Lowpass",         te::AirWindowsLowpass2::xmlTypeName,       "Filter",     "Smooth low-pass" },
-            { "Highpass",        te::AirWindowsHighpass2::xmlTypeName,      "Filter",     "Smooth high-pass" },
+                { "Filter",          te::LowPassPlugin::xmlTypeName,            "Filter",     "Low-pass / high-pass filter" },
+                { "Lowpass",         te::AirWindowsLowpass2::xmlTypeName,       "Filter",     "Smooth low-pass" },
+                { "Highpass",        te::AirWindowsHighpass2::xmlTypeName,      "Filter",     "Smooth high-pass" },
 
-            { "Pitch Shift",     te::PitchShiftPlugin::xmlTypeName,         "Pitch",      "Shift pitch in semitones" },
+                { "Pitch Shift",     te::PitchShiftPlugin::xmlTypeName,         "Pitch",      "Shift pitch in semitones" },
 
-            { "Analyzer",        AnalyzerPlugin::xmlTypeName,               "Utility",    "Spectrum analyzer + oscilloscope" },
-        };
+                { "Analyzer",        AnalyzerPlugin::xmlTypeName,               "Utility",    "Spectrum analyzer + oscilloscope" },
+            };
+            v.insert (v.end(), others.begin(), others.end());
+            return v;
+        }();
         return list;
     }
 
@@ -141,6 +151,9 @@ namespace Presets
     {
         if (isSynthType (type))
             return synthFactory (type);
+
+        if (auto it = UFX::factoryPresets().find (type); it != UFX::factoryPresets().end())
+            return it->second;
 
         static const std::map<juce::String, std::vector<Preset>> all {
             { te::EqualiserPlugin::xmlTypeName, {
@@ -483,8 +496,14 @@ public:
             addAndMakeVisible (sidechain);
         }
 
-        int height = 300;
-        if (auto analyzer = dynamic_cast<AnalyzerPlugin*> (&p))
+        int height = 300, width = 560;
+        if (auto untitled = dynamic_cast<UFX::Plugin*> (&p))
+        {
+            visual = UFX::createView (s, *untitled);
+            height = headerHeight + visual->getHeight();
+            width = juce::jmax (width, visual->getWidth());
+        }
+        else if (auto analyzer = dynamic_cast<AnalyzerPlugin*> (&p))
         {
             visual = std::make_unique<AnalyzerView> (*analyzer);
             height = 380;
@@ -511,7 +530,7 @@ public:
         }();
 
         Widgets::noFocus (*this);
-        setSize (560, height);
+        setSize (width, height);
         startTimerHz (5);
     }
 

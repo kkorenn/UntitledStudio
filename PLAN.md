@@ -174,10 +174,10 @@ Every effect has a themed window, bypass, factory presets (main ones) and user p
 
 **Core mixing**
 - [x] Parametric EQ with draggable curve (4 bands)
-- [ ] 8 bands + live spectrum behind the curve (≈ Fruity Parametric EQ 2)
+- [x] 7 bands + live spectrum behind the curve (≈ Fruity Parametric EQ 2) — Untitled Parametric EQ: bell/shelf/cut/notch/band-pass per band, 12 dB/oct cuts only
 - [ ] Graphic EQ
 - [x] Compressor (≈ Fruity Compressor)
-- [ ] Multiband compressor / maximizer (≈ Maximus) — needs custom DSP
+- [x] Multiband compressor / maximizer (≈ Maximus) — Untitled Maximizer: 3 bands (LR4 crossovers) + look-ahead limiter; no per-band solo yet
 - [x] Bus Glue + Vari-Mu bus compressors
 - [x] Limiter for master (≈ Fruity Limiter)
 - [x] Gate
@@ -190,17 +190,17 @@ Every effect has a themed window, bypass, factory presets (main ones) and user p
 - [x] Convolution reverb with generated room (≈ Fruity Convolver)
 - [ ] Load your own impulse response files
 - [x] Delay, Tape Delay, Echo
-- [ ] Tempo-synced + ping-pong delay (≈ Fruity Delay 3)
+- [x] Tempo-synced + ping-pong delay (≈ Fruity Delay 3) — Untitled Delay: 1/64…4 bars incl. dotted/triplet or ms, filters in the feedback
 
 **Color / creative**
 - [x] Distortion / saturation / bitcrusher (≈ Fruity Blood Overdrive, Fast Dist)
 - [x] Tape / tube / vinyl warmth
 - [x] Chorus, ensemble, phaser, tremolo, vibrato
-- [ ] Flanger
+- [x] Flanger (Untitled Flanger; Untitled Chorus / Phaser added too, all with tempo-sync LFO)
 - [x] Filters (low/high-pass)
-- [ ] Filter with LFO + envelope (≈ Fruity Love Philter)
-- [ ] Volume/pitch/time gating effect, draw-your-own envelope (≈ Gross Beat)
-- [ ] Trance gate / stutter
+- [x] Filter with LFO + envelope (≈ Fruity Love Philter) — Untitled Filter: one SVF (12/24 dB) with synced LFO + envelope follower; not Love Philter's multi-filter drawable envelopes
+- [x] Volume/pitch/time gating effect, draw-your-own envelope (≈ Gross Beat) — Untitled Gate & Time FX: 16-point drawn volume shape + stutter / half speed / tape stop; no pitch, no per-step time envelope
+- [x] Trance gate / stutter (same plugin, step mode)
 - [x] Enhancer + Air (≈ Soundgoodizer-ish)
 - [ ] Vocoder (≈ Vocodex)
 - [ ] Pitch correction / autotune (≈ Pitcher, NewTone)
@@ -208,7 +208,7 @@ Every effect has a themed window, bypass, factory presets (main ones) and user p
 
 **Utility**
 - [x] Spectrum analyzer + oscilloscope
-- [ ] Loudness meter (LUFS)
+- [x] Loudness meter (LUFS) — Untitled Loudness Meter: BS.1770 momentary / short-term / gated integrated + 4x true-peak estimate; no LRA
 - [ ] Tuner
 - [ ] Sidechain tool (volume ducking shape)
 
@@ -349,6 +349,7 @@ Every effect has a themed window, bypass, factory presets (main ones) and user p
 - [ ] Import report window ("Imported X channels, replaced Y plugins...")
 - [ ] Support FL 20 / 21 / 2024 format differences
 - [ ] FILE > Import FL Studio project... + drag .flp onto the window
+- [x] Untitled stock effects suite (substitutes for FL stock effects on import) — FlStockMap::untitledTypeFor() maps FL plugin names to our types; parameter mapping still to do
 
 ## Phase 16 — Release
 - [ ] App icon, splash, about screen

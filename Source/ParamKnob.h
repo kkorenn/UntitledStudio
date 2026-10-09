@@ -55,7 +55,6 @@ public:
         juce::Slider::mouseDown (e);
     }
 
-private:
     void updateHint()
     {
         auto hint = studio->describeParam (*param) + ": " + param->getCurrentValueAsStringWithLabel();
@@ -90,6 +89,7 @@ private:
         m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this));
     }
 
+private:
     Studio* studio = nullptr;
     te::AutomatableParameter::Ptr param;
 };
