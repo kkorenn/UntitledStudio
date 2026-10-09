@@ -83,13 +83,13 @@ Every feature, every phase:
 **Done when:** sine plays, volume slider is smooth with no clicks, changing buffer size works.
 
 ## Phase 2 — Simple synth (learn DSP basics)
-- [ ] Oscillators: sine, saw, square, triangle
-- [ ] Play notes with computer keyboard (A–K row = piano keys, like FL)
-- [ ] MIDI keyboard input (`MidiInput`)
-- [ ] Polyphony: 8–16 voices (`juce::Synthesiser`)
-- [ ] ADSR envelope
-- [ ] Low-pass filter with cutoff + resonance
-- [ ] Anti-click: smooth parameter changes (`SmoothedValue`)
+- [x] Oscillators: sine, saw, square, triangle
+- [x] Play notes with computer keyboard, FL layout: Z-row = lower octave (Z S X D C V G B H N J M), Q-row = upper octave (Q 2 W 3 E R 5 T 6 Y 7 U I 9 O 0 P)
+- [x] MIDI keyboard input (`MidiInput`)
+- [x] Polyphony: 8–16 voices (`juce::Synthesiser`)
+- [x] ADSR envelope
+- [x] Low-pass filter with cutoff + resonance
+- [x] Anti-click: smooth parameter changes (`SmoothedValue`)
 
 **Done when:** you can play chords on a MIDI keyboard with no clicks, pops or stuck notes.
 
