@@ -33,7 +33,7 @@ public:
         dropFile (juce::File (d.description.toString().fromFirstOccurrenceOf ("file:", false, false)), d.localPosition);
     }
 
-    bool isInterestedInFileDrag (const juce::StringArray&) override   { return true; }
+    bool isInterestedInFileDrag (const juce::StringArray& files) override   { return ! Studio::isFlpFile (files[0]); }
     void fileDragMove (const juce::StringArray&, int x, int y) override { setDropHighlight ({ x, y }); }
     void fileDragExit (const juce::StringArray&) override            { setDropHighlight ({ -1, -1 }); }
 

@@ -116,7 +116,7 @@ public:
     {
         dropFile (juce::File (d.description.toString().fromFirstOccurrenceOf ("file:", false, false)), d.localPosition);
     }
-    bool isInterestedInFileDrag (const juce::StringArray&) override { return true; }
+    bool isInterestedInFileDrag (const juce::StringArray& files) override { return ! Studio::isFlpFile (files[0]); }
     void filesDropped (const juce::StringArray& files, int x, int y) override
     {
         for (int i = 0; i < files.size(); ++i)

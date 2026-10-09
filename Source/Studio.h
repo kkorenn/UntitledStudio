@@ -294,6 +294,19 @@ public:
         return true;
     }
 
+    // After building a project from an import (on top of newProjectFromTemplate ("Empty")): one
+    // clean starting point, untitled and unsaved.
+    void finishImport()
+    {
+        selectChannel (getChannels().getChild (0)[IDs::id]);
+        regenerateNow();
+        undo().clearUndoHistory();
+        projectFile = juce::File();
+        startsDirty = dirty = true;
+    }
+
+    static bool isFlpFile (const juce::String& path) { return path.endsWithIgnoreCase (".flp"); }
+
     // Samples / plugins the last loaded project refers to that aren't there any more.
     const juce::StringArray& getMissingFiles() const { return missingFiles; }
 

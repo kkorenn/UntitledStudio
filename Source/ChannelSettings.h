@@ -145,7 +145,7 @@ public:
         replace (juce::File (d.description.toString().fromFirstOccurrenceOf ("file:", false, false)));
     }
 
-    bool isInterestedInFileDrag (const juce::StringArray&) override { return true; }
+    bool isInterestedInFileDrag (const juce::StringArray& files) override { return ! Studio::isFlpFile (files[0]); }
     void filesDropped (const juce::StringArray& files, int, int) override { replace (juce::File (files[0])); }
 
 private:
@@ -280,7 +280,7 @@ public:
         replacePad (padAt (d.localPosition), juce::File (d.description.toString().fromFirstOccurrenceOf ("file:", false, false)));
     }
 
-    bool isInterestedInFileDrag (const juce::StringArray&) override     { return true; }
+    bool isInterestedInFileDrag (const juce::StringArray& files) override     { return ! Studio::isFlpFile (files[0]); }
     void fileDragMove (const juce::StringArray&, int x, int y) override { setHover (padAt ({ x, y })); }
     void fileDragExit (const juce::StringArray&) override               { setHover (-1); }
     void filesDropped (const juce::StringArray& files, int x, int y) override

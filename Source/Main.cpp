@@ -19,6 +19,8 @@ using namespace std::literals;
 #include "AudioEditor.h"
 #include "Popups.h"
 #include "UntitledTests.h"
+#include "FlpImport.h"
+#include "FlpTests.h"
 
 #if JUCE_MAC
  #include <mach/mach.h>
@@ -146,6 +148,7 @@ class MainComponent : public juce::Component,
                       private juce::ChangeListener,
                       private juce::MidiInputCallback,
                       public juce::DragAndDropContainer,
+                      public juce::FileDragAndDropTarget,
                       private juce::Timer
 {
 public:
@@ -463,6 +466,7 @@ public:
             recent.removeNonExistentFiles();
             recent.createPopupMenuItems (recentMenu, recentMenuBase, true, true);
             m.addSubMenu ("Open recent", recentMenu, recent.getNumFiles() > 0);
+            m.addItem ("Import FL Studio project (.flp)...", [this] { importFlpProject(); });
             m.addSeparator();
             m.addItem ("Save                    Ctrl+S", [this] { save (nullptr); });
             m.addItem ("Save as...        Ctrl+Shift+S", [this] { saveAs (nullptr); });
@@ -544,6 +548,57 @@ public:
             juce::AlertWindow::showAsync (juce::MessageBoxOptions().withIconType (juce::MessageBoxIconType::WarningIcon)
                                               .withTitle ("Couldn't open project").withMessage (file.getFullPathName()).withButton ("OK"),
                                           nullptr);
+    }
+
+    void importFlpProject()
+    {
+        maybeSave ([this]
+        {
+            chooser = std::make_unique<juce::FileChooser> ("Import FL Studio project", juce::File::getSpecialLocation (juce::File::userDocumentsDirectory), "*.flp");
+            chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                                  [this] (const juce::FileChooser& fc)
+                                  {
+                                      if (fc.getResult().existsAsFile())
+                                          importFlp (fc.getResult());
+                                  });
+        });
+    }
+
+    void importFlp (const juce::File& file)
+    {
+        FlpImport::Report report;
+        if (auto r = FlpImport::importFile (studio, file, report); r.failed())
+        {
+            juce::AlertWindow::showAsync (juce::MessageBoxOptions().withIconType (juce::MessageBoxIconType::WarningIcon)
+                                              .withTitle ("Couldn't import FL Studio project").withMessage (file.getFullPathName() + "\n\n" + r.getErrorMessage())
+                                              .withButton ("OK"),
+                                          nullptr);
+            return;
+        }
+
+        auto text = std::make_unique<juce::TextEditor>();
+        text->setMultiLine (true);
+        text->setReadOnly (true);
+        text->setScrollbarsShown (true);
+        text->setFont (Theme::font (13.0f));
+        text->setColour (juce::TextEditor::backgroundColourId, Theme::panelDark);
+        text->setColour (juce::TextEditor::textColourId, Theme::text);
+        text->setColour (juce::TextEditor::outlineColourId, Theme::outline);
+        text->setText (report.toText(), false);
+        text->setSize (600, 440);
+        auto* panel = editorPanels.add (new Panel ("Import report - " + file.getFileName(), std::move (text)));
+        workspace.addAndMakeVisible (panel);
+        panel->setBounds (260, 90, 602, 440 + Panel::titleHeight + 1);
+        playlistPanel->show();
+        panel->toFront (false);
+        flashHint (report.oneLine(), 12000);
+    }
+
+    // FL Studio projects dropped anywhere on the window are imported.
+    bool isInterestedInFileDrag (const juce::StringArray& files) override { return Studio::isFlpFile (files[0]); }
+    void filesDropped (const juce::StringArray& files, int, int) override
+    {
+        maybeSave ([this, file = juce::File (files[0])] { importFlp (file); });
     }
 
     void save (std::function<void()> then)
@@ -1178,6 +1233,7 @@ public:
     void debugOpenFirstChannel() { toggleChannelWindow (studio.getChannels().getChild (0)[IDs::id]); }
     void debugOpenDrumPad()      { toggleChannelWindow (studio.addDrumPadChannel()); }
     void debugTemplate (const juce::String& name) { studio.newProjectFromTemplate (name); }
+    void debugImportFlp (const juce::File& file)  { importFlp (file); }
     void debugOpenFm()           { toggleChannelWindow (studio.addPresetChannel ("E-Piano")); }
     void debugOpenSynth()        { toggleChannelWindow (studio.addPresetChannel ("Acid Bass")); }
     void debugOpenInstrument()   { toggleChannelWindow (studio.addInstrumentChannel (DrumKit::getDrumsFolder().getChildFile ("808.wav"))); }
@@ -1438,6 +1494,7 @@ namespace SelfTest
         }
 
         ok &= UntitledTests::run (s, check);
+        ok &= FlpTests::run (engine, check);
 
         {
             // Every catalog effect loads; presets change parameters.
@@ -2512,6 +2569,10 @@ public:
             if (commandLine.contains ("--open-audio-editor"))
                 if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
                     mc->debugOpenAudioEditor();
+
+            if (commandLine.contains ("--import-flp "))
+                if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
+                    mc->debugImportFlp (juce::File (commandLine.fromFirstOccurrenceOf ("--import-flp ", false, false).upToFirstOccurrenceOf (" --", false, false).unquoted()));
 
             if (commandLine.contains ("--open-channel"))
                 if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))

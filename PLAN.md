@@ -334,22 +334,23 @@ Every effect has a themed window, bypass, factory presets (main ones) and user p
   - [ ] macOS doesn't need it (CoreAudio is already low-latency)
 
 ## Phase 15b — FL Studio project import (.flp)
-> Read-only import. .flp is undocumented; use the community reverse-engineering (PyFLP, MIT) as format reference.
+> Read-only import. .flp is undocumented; we wrote our own reader (Source/FlpReader.h), using the community
+> project PyFLP (GPLv3) only as a format reference (event IDs, struct layouts). No PyFLP code is copied.
 > Never copy FL code or bundle FL plugins. Saving back to .flp is out of scope.
-- [ ] Collect real .flp test files (simple beat, full song w/ audio + automation, one with 3rd-party VSTs)
-- [ ] FLP reader: FLhd header + FLdt event stream (byte/word/dword/varint-length events)
-- [ ] Import tempo, time signature, project name
-- [ ] Import channels: names, volume, pan, sampler sample paths (warn if missing)
-- [ ] Import patterns + piano roll notes
-- [ ] Import playlist: pattern clips, audio clips, lanes
-- [ ] Import mixer: routing, levels, mute/solo
-- [ ] Third-party VST plugins: reload plugin + state if installed
-- [ ] FL native plugins (Sytrus, FLEX, Fruity effects...): replace with closest built-in, list in report
-- [ ] Automation clips (map FL parameters we understand)
-- [ ] Import report window ("Imported X channels, replaced Y plugins...")
-- [ ] Support FL 20 / 21 / 2024 format differences
-- [ ] FILE > Import FL Studio project... + drag .flp onto the window
-- [x] Untitled stock effects suite (substitutes for FL stock effects on import) — FlStockMap::untitledTypeFor() maps FL plugin names to our types; parameter mapping still to do
+- [ ] Collect real .flp test files (simple beat, full song w/ audio + automation, one with 3rd-party VSTs) — so far only PyFLP's test files (`scripts/fetch-flp-testdata.sh` -> testdata/flp, gitignored): one FL 20.8.4 project + presets. Still need FL 21 / 2024 songs with audio, linked automation and installed VSTs
+- [x] FLP reader: FLhd header + FLdt event stream (byte/word/dword/varint-length events) — UTF-16 text from FL 11.5, rejects all corrupted fixtures, 50 seeded mutations per self-test run
+- [x] Import tempo, time signature, project name — title/version/tempo shown in the import report (we have no project-title field); x/8 etc. become x/4 (reported); swing imported
+- [x] Import channels: names, volume, pan, sampler sample paths (warn if missing) — also colours, mute (disabled), root note, insert routing; paths: absolute, next to the .flp, %FLStudioUserData% / %FLStudioFactoryData% (installed FL), then by file name under the .flp's folder. Channel volume is relative to FL's 78% default (= our 0 dB)
+- [x] Import patterns + piano roll notes — names, colours, notes (fine pitch rounds to the nearest key; note pan / release / mod X/Y not imported, we have no per-note fields). Pattern length (FL's fixed length) not imported: ours is auto. Layer channels: their notes are copied to the layered channels
+- [x] Import playlist: pattern clips, audio clips, lanes — current arrangement only (others reported), FL track -> lane (tracks above 64 go to the last lane), clip start/length/offset; muted flag (0x2000) and audio clip offsets are unverified guesses; track names not imported (lanes have no names)
+- [x] Import mixer: routing, levels, mute/solo — names, volume, pan, disabled -> muted, insert->insert routes (a single route not to master = output to that insert, else sends; zero-level routes ignored). Solo, stereo separation, insert EQ, send levels not imported. We keep 20 inserts: FL inserts above 20 fold into insert 20 (reported) — raising Studio::numInserts would widen every project's mixer for rare cases
+- [ ] Third-party VST plugins: reload plugin + state if installed — implemented, NOT verified (no plugins installed on the dev machine): matched by name (+vendor); VST3 state from FL's wrapper records restored via the VST3 component/controller state; VST2 chunks wrapped as a "VstW" bank for the plugin's VST3 build; AU targets and non-chunk VST2 params not restored. Not installed -> 4-OSC placeholder + listed as missing
+- [x] FL native plugins (Sytrus, FLEX, Fruity effects...): replace with closest built-in, list in report — effects via FlStockMap; settings decoded for Balance, Soft Clipper, Stereo Enhancer, Fast Dist, Blood Overdrive, Soundgoodizer (layouts known); Parametric EQ 2 / Limiter / Delay 3 / Reeverb 2 / Compressor get default settings (layouts unknown). Generators: BooBass/Transistor Bass/Plucked! -> 4-OSC presets, Sytrus/GMS/Toxic/DX10/FL Keys -> FM Synth preset by channel-name heuristic, Harmor/Harmless/PoiZone/... -> 4-OSC preset, 3x Osc -> default 4-OSC (state not decoded), Fruit Kick -> sampler kick, FPC -> drum pad (pads from sample paths found in its data), Slicex/Fruity Slicer -> our slicer, FLEX/DirectWave -> instrument if a sample path is found in the data, else placeholder; MIDI Out etc. skipped
+- [ ] Automation clips (map FL parameters we understand) — points (beats, 0..1) parsed and verified; the clip -> parameter link (remote-controller event) is decoded by guess (channel vol/pan, insert vol/pan, plugin param by index) and unverified: the only test clip is unlinked, so it's reported, not imported. Tempo automation not imported
+- [x] Import report window ("Imported X channels, replaced Y plugins...") — themed panel + hint bar; time markers listed there (we have no markers)
+- [ ] Support FL 20 / 21 / 2024 format differences — only FL 20.8.4 verified with a real file; FL 21's 60-byte playlist items handled from the format notes, untested
+- [x] FILE > Import FL Studio project... + drag .flp onto the window
+- [x] Untitled stock effects suite (substitutes for FL stock effects on import) — FlStockMap::untitledTypeFor() maps FL plugin names to our types; parameter mapping for the documented ones (see above)
 
 ## Phase 16 — Release
 - [ ] App icon, splash, about screen

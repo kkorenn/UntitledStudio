@@ -51,6 +51,8 @@ build\UntitledStudio_artefacts\Release\untitledstudio.exe --selftest
 - **MP3 export** uses the `lame` command-line encoder if it's installed
   (macOS: `brew install lame`). WAV, FLAC and OGG need nothing extra.
 - **SoundFont test**: the self-test also loads a SoundFont when `fluid-synth` is installed through Homebrew.
+- **FL Studio import tests**: `scripts/fetch-flp-testdata.sh` copies PyFLP's test files into `testdata/flp`
+  (gitignored, never commit them). Without them the self-test skips the real-file checks.
 
 ## Dev flags
 
@@ -59,5 +61,6 @@ build\UntitledStudio_artefacts\Release\untitledstudio.exe --selftest
 | `--selftest` | Headless checks, exit code 0 = pass |
 | `--stress` | 100 channels / 50 effects / 16 bars: prints render speed and per-block load at 256 samples |
 | `--snapshot file.png` | Renders the main window to a PNG and quits (`--snapshot-scale 2` for Retina) |
+| `--import-flp <file.flp>` | Imports an FL Studio project before `--snapshot` (put it last) |
 | `--open-mixer`, `--open-pianoroll`, `--demo-song`, `--open-channel`, `--open-drumpad`, `--open-instrument`, `--open-fm`, `--open-synth`, `--open-audio-editor`, `--open-picker`, `--template <name>` | Set up a window before `--snapshot` |
 | `--dump-params` | Lists every effect's parameters |
