@@ -426,8 +426,22 @@ private:
         return -1;
     }
 
-    void timerCallback() override { repaint(); }
+    // Repaint only when a band moved (automation, undo, knobs), not 20 times a second regardless.
+    void timerCallback() override
+    {
+        float signature = 0.0f;
+        for (int b = 0; b < 4; ++b)
+            for (int k = 0; k < 3; ++k)
+                if (params[b][k] != nullptr)
+                    signature += params[b][k]->getCurrentValue() * (float) (1 + b * 3 + k);
+        if (isShowing() && ! juce::exactlyEqual (signature, lastSignature))
+        {
+            lastSignature = signature;
+            repaint();
+        }
+    }
 
+    float lastSignature = -1.0f;
     juce::ReferenceCountedObjectPtr<te::EqualiserPlugin> eq;
     te::AutomatableParameter::Ptr params[4][3];
     int dragging = -1;

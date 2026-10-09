@@ -799,10 +799,20 @@ private:
         }
         else if (playing || wasPlaying)
         {
-            grid.repaint();
+            // Repaint just the playhead's old and new columns (a full repaint per frame is costly).
+            const int x = playing && ! studio.isSongMode()
+                              ? beatToX (std::fmod (studio.getPositionBeats(), juce::jmax (1.0e-3, studio.getLoopEndBeats()))) : -10;
+            if (x != lastPlayheadX)
+            {
+                grid.repaint (lastPlayheadX - 1, 0, 3, grid.getHeight());
+                grid.repaint (x - 1, 0, 3, grid.getHeight());
+                lastPlayheadX = x;
+            }
         }
         wasPlaying = playing;
     }
+
+    int lastPlayheadX = -10;
 
     Studio& studio;
     Tool tool = Tool::pencil;

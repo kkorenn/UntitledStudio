@@ -743,7 +743,10 @@ public:
             }
         }
         voiceEngine.render (*rc.destBuffer, rc.bufferStartSample + done, rc.bufferNumSamples - done, p);
+        voicesPlaying.store (voiceEngine.getNumActiveVoices(), std::memory_order_relaxed);
     }
+
+    std::atomic<int> voicesPlaying { 0 }; // for the status bar
 
     void restorePluginStateFromValueTree (const juce::ValueTree& v) override
     {

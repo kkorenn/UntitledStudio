@@ -922,17 +922,26 @@ private:
             ruler.repaint();
             repaint (patternLabelArea);
         }
-        else if (studio.isPlaying() && studio.isSongMode())
+        else if (studio.isSongMode())
         {
             // Follow the playhead: page forward when it leaves the view.
             const int x = beatToX (studio.getPositionBeats());
             const auto view = viewport.getViewArea();
-            if (x > view.getRight() - 20 || x < view.getX())
+            if (studio.isPlaying() && (x > view.getRight() - 20 || x < view.getX()))
                 viewport.setViewPosition (juce::jmax (0, x - 40), view.getY());
-            grid.repaint();
-            ruler.repaint();
+
+            // Only the playhead's old and new columns need repainting, not the whole grid.
+            if (x != lastPlayheadX)
+            {
+                grid.repaint (lastPlayheadX - 1, 0, 3, grid.getHeight());
+                grid.repaint (x - 1, 0, 3, grid.getHeight());
+                ruler.repaint();
+                lastPlayheadX = x;
+            }
         }
     }
+
+    int lastPlayheadX = -10;
 
     Studio& studio;
     Tool tool = Tool::pencil;

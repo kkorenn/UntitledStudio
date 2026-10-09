@@ -318,16 +318,16 @@ Every effect has a themed window, bypass, factory presets (main ones) and user p
 **Done when:** make a full song using ONLY built-in instruments, sounds & effects — no 3rd-party plugins.
 
 ## Phase 15 — Polish, UX & stability
-- [ ] Custom look & feel: dark theme, consistent colors/fonts (`LookAndFeel`)
-- [ ] Hi-DPI / Retina scaling, resizable everything
-- [ ] Keyboard shortcuts everywhere (match FL defaults)
-- [ ] Detachable / dockable windows
-- [ ] Hint bar (hover → explain control, like FL)
-- [ ] CPU meter, voice count, RAM display
-- [ ] Profile CPU (Instruments on macOS), fix hotspots
-- [ ] Stress test: 100 tracks, 50 plugins, no dropouts at 256 buffer
-- [ ] Fuzz save/load, test corrupted project files
-- [ ] Windows build (ASIO support)
+- [x] Custom look & feel: dark theme, consistent colors/fonts (`LookAndFeel`) — base `ColourScheme` so every stock widget/dialog (alerts, combo boxes, popup menus, text editors, toggles, lists, scrollbars, callouts) uses Theme colours + Theme fonts; checked every window via `--snapshot`
+- [x] Hi-DPI / Retina scaling, resizable everything — `--snapshot-scale 2` renders crisp (all vector drawing, no bitmaps); main window min 960x600, panels min 200x120, detached windows resizable
+- [x] Keyboard shortcuts everywhere (match FL defaults) — F5/F6/F7/F9, F8 sound/plugin picker (type to search, Return adds a channel), F10 settings, F12 close all, Alt+F8 browser, Tab next window, numpad +/- or Ctrl+Up/Down next/previous pattern, Ctrl+N/O/S/Shift+S/R/Z/Y, Space, L; OPTIONS > Keyboard shortcuts lists them
+- [x] Detachable / dockable windows — double-click title = maximize/restore, drag snaps to workspace edges + other windows (8 px), right-click title > Detach into a native window (closing it docks back); open windows + bounds remembered across launches
+- [x] Hint bar (hover → explain control, like FL) — existed since Phase 1; now also shows non-blocking warnings (missing samples/plugins after loading)
+- [x] CPU meter, voice count, RAM display — RAM = resident memory (mach task_info; Windows code path untested); voices = sounding voices of our Instrument/drum pad/FM Synth plugins (atomic per plugin); 4-OSC and the stock sampler don't expose a count yet
+- [x] Profile CPU (Instruments on macOS), fix hotspots — `sample` on a Release `--stress` run. Top hotspot in our code: FM Synth `std::sin` (4 ops x voices x samples) → interpolated sine table, FM CPU -46% (5078 → 2735 samples). Model→engine regen rewrote every channel's notes on any change → one pass over notes + only rewrite channels whose notes changed (100-channel regen 6.7 → 4.0 ms; one-note edit 9.1 → 0.4 ms and no graph rebuild for the other 99 channels). UI: playlist/piano-roll playhead repaints only its columns (was full grid at 30 Hz), EQ view repaints only when a band moves (was 20 Hz always), analyzer skips FFT when hidden. Rest of the profile is Tracktion/JUCE DSP (reverb, 4-OSC, ButterComp2)
+- [x] Stress test: 100 tracks, 50 plugins, no dropouts at 256 buffer — `--stress` (25 sampler, 25 4-OSC, 25 FM, 25 instrument channels, 50 effects on 20 inserts incl. EQ/compressor/reverb/delay/Airwindows, 1200 notes, 16 bars): live graph at 256 samples / 44.1 kHz averages 7.5% of the block budget, worst block 13–26%, 0 blocks over budget; offline render 9.4x realtime. Measured on this Mac with 12 audio threads; a 4-core machine will be heavier
+- [x] Fuzz save/load, test corrupted project files — in `--selftest`: empty / truncated / garbage / foreign XML / no STUDIO / missing file are rejected; old project shape and a minimal hand-written project load; huge/NaN/negative values are clamped on load; missing samples + plugins are listed (hint bar: "N samples could not be found"); 24 seeded random byte/attribute/element mutations load or are rejected without crashing (400 mutations checked once by hand). Also fixed: a fresh project came up "unsaved" (Tracktion's async track/clip sorting landed in the undo history)
+- [ ] Windows build (ASIO support) — prepared, not built or tested yet: CMake guards mac-only flags, static MSVC runtime, `UNTITLEDSTUDIO_ASIO_SDK_DIR` enables ASIO (WASAPI + DirectSound always on), see BUILDING.md
 - [ ] Own virtual ASIO driver for Windows (like FL Studio ASIO / ASIO4ALL): low-latency ASIO on any sound card, wraps WASAPI, lets other apps share the device
   - [ ] Build as a separate COM DLL + installer registration; test with other DAWs too
   - [ ] Check ASIO SDK license terms (Steinberg) before shipping

@@ -145,6 +145,9 @@ private:
             historyPos = (historyPos + 1) % scopeSize;
         }
 
+        if (! isShowing()) // keep draining the plugin's buffer, skip the FFT + repaint
+            return;
+
         std::array<float, fftSize * 2> data {};
         for (int i = 0; i < fftSize; ++i)
             data[(size_t) i] = fftInput[(size_t) ((fftPos + i) % fftSize)];

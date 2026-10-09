@@ -32,7 +32,39 @@ namespace Theme
     public:
         LookAndFeel()
         {
+            // Base scheme first: every stock JUCE widget / dialog (alerts, file lists, tables,
+            // toggles, scrollbars, callouts) picks its colours from it.
+            setColourScheme ({ panelDark, panel, panelDark, outline, text, titleBar, juce::Colours::black, accent, text });
+
             setColour (juce::ResizableWindow::backgroundColourId, background);
+            setColour (juce::AlertWindow::backgroundColourId, panelDark);
+            setColour (juce::AlertWindow::textColourId, text);
+            setColour (juce::AlertWindow::outlineColourId, outline);
+            setColour (juce::ComboBox::textColourId, text);
+            setColour (juce::ComboBox::arrowColourId, textDim);
+            setColour (juce::ComboBox::focusedOutlineColourId, accent);
+            setColour (juce::PopupMenu::textColourId, text);
+            setColour (juce::PopupMenu::headerTextColourId, accent);
+            setColour (juce::TextEditor::textColourId, text);
+            setColour (juce::TextEditor::highlightColourId, accent.withAlpha (0.4f));
+            setColour (juce::TextEditor::highlightedTextColourId, text);
+            setColour (juce::TextEditor::focusedOutlineColourId, accent);
+            setColour (juce::CaretComponent::caretColourId, accent);
+            setColour (juce::ToggleButton::textColourId, text);
+            setColour (juce::ToggleButton::tickColourId, accent);
+            setColour (juce::ToggleButton::tickDisabledColourId, textDim);
+            setColour (juce::ScrollBar::trackColourId, juce::Colours::transparentBlack);
+            setColour (juce::ListBox::backgroundColourId, panelDark);
+            setColour (juce::ListBox::textColourId, text);
+            setColour (juce::TooltipWindow::textColourId, text);
+            setColour (juce::TooltipWindow::outlineColourId, outline);
+            setColour (juce::Label::textWhenEditingColourId, text);
+            setColour (juce::Label::backgroundWhenEditingColourId, lcd);
+            setColour (juce::Slider::textBoxTextColourId, text);
+            setColour (juce::Slider::trackColourId, accent);
+            setColour (juce::Slider::backgroundColourId, lcd);
+            setColour (juce::TreeView::backgroundColourId, panelDark);
+            setColour (juce::TreeView::selectedItemBackgroundColourId, accent.withAlpha (0.35f));
             setColour (juce::TextButton::buttonColourId, panel);
             setColour (juce::TextButton::buttonOnColourId, accent.darker (0.2f));
             setColour (juce::TextButton::textColourOffId, text);
@@ -86,5 +118,9 @@ namespace Theme
         juce::Font getTextButtonFont (juce::TextButton&, int h) override { return font (juce::jmin (14.0f, (float) h * 0.6f)); }
         juce::Font getPopupMenuFont() override                         { return font (14.0f); }
         juce::Font getLabelFont (juce::Label&) override                { return font (13.0f); }
+        juce::Font getComboBoxFont (juce::ComboBox& b) override         { return font (juce::jmin (14.0f, (float) b.getHeight() * 0.55f)); }
+        juce::Font getAlertWindowTitleFont() override                   { return font (16.0f, true); }
+        juce::Font getAlertWindowMessageFont() override                 { return font (14.0f); }
+        juce::Font getAlertWindowFont() override                        { return font (13.0f); }
     };
 }

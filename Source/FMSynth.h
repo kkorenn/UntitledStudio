@@ -8,6 +8,24 @@ namespace FM
     enum OpParam { ratio, fine, level, attack, decay, sustain, release, numOpParams };
     enum Global { algorithm = numOps * numOpParams, feedback, cutoff, resonance, velocity, volume, numParams };
 
+    // Interpolated sine table: 4 operators per voice per sample made std::sin the hottest spot in profiling.
+    constexpr int sineSize = 2048;
+    inline const std::array<float, sineSize + 1> sineTable = []
+    {
+        std::array<float, sineSize + 1> t {};
+        for (int i = 0; i <= sineSize; ++i)
+            t[(size_t) i] = (float) std::sin (juce::MathConstants<double>::twoPi * i / sineSize);
+        return t;
+    }();
+
+    inline float sineOfCycles (float cycles)
+    {
+        const float x = (cycles - std::floor (cycles)) * (float) sineSize;
+        const int i = (int) x & (sineSize - 1);
+        const float frac = x - std::floor (x);
+        return sineTable[(size_t) i] + frac * (sineTable[(size_t) i + 1] - sineTable[(size_t) i]);
+    }
+
     // Per algorithm: which operators modulate each operator (bit i = op i+1), and which are carriers.
     // Modulators always have a higher number than their target, so ops render 4 -> 1.
     struct Algorithm { const char* name; std::array<int, numOps> mods; int carriers; };
@@ -147,7 +165,7 @@ namespace FM
                     pm += f.feedback * (fb1 + fb2) * 0.5f;
 
                 const float e = env[(size_t) op].next (f, op);
-                const float o = std::sin (juce::MathConstants<float>::twoPi * phase[(size_t) op] + pm * 4.0f)
+                const float o = sineOfCycles (phase[(size_t) op] + pm * (4.0f / juce::MathConstants<float>::twoPi))
                                     * e * f.level[(size_t) op] * velGain;
                 out[(size_t) op] = o;
                 phase[(size_t) op] += inc * f.freqMul[(size_t) op];
@@ -247,7 +265,10 @@ public:
             }
         }
         render (*rc.destBuffer, rc.bufferStartSample + done, rc.bufferNumSamples - done);
+        voicesPlaying.store (getNumActiveVoices(), std::memory_order_relaxed);
     }
+
+    std::atomic<int> voicesPlaying { 0 }; // for the status bar
 
     void restorePluginStateFromValueTree (const juce::ValueTree& v) override
     {

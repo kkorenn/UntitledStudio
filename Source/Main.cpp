@@ -17,6 +17,29 @@ using namespace std::literals;
 #include "PluginWindow.h"
 #include "Exporter.h"
 #include "AudioEditor.h"
+#include "Popups.h"
+
+#if JUCE_MAC
+ #include <mach/mach.h>
+#elif JUCE_WINDOWS
+ #include <psapi.h>
+#endif
+
+// Resident memory of this process in bytes (0 where not implemented).
+inline juce::int64 getProcessMemory()
+{
+   #if JUCE_MAC
+    mach_task_basic_info info {};
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info (mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t) &info, &count) == KERN_SUCCESS)
+        return (juce::int64) info.resident_size;
+   #elif JUCE_WINDOWS
+    PROCESS_MEMORY_COUNTERS pmc {};
+    if (K32GetProcessMemoryInfo (GetCurrentProcess(), &pmc, sizeof (pmc)))
+        return (juce::int64) pmc.WorkingSetSize;
+   #endif
+    return 0;
+}
 
 //==============================================================================
 // FL "typing keyboard to piano": Z-row = lower octave, Q-row = upper octave.
@@ -248,6 +271,10 @@ public:
                 || (isFrontPanel (*playlistPanel) && Playlist::reservedKeys().containsChar ((juce::juce_wchar) code));
         };
 
+        Panel::forwardKey = [this] (const juce::KeyPress& k) { return keyPressed (k); };
+        Panel::forwardKeyState = [this] { return keyStateChanged (false); };
+        restoreLayout();
+
         lastGeneration = studio.getEditGeneration();
         recent.setMaxNumberOfItems (10);
         recent.restoreFromString (settings.getValue ("recentFiles"));
@@ -265,6 +292,9 @@ public:
 
     ~MainComponent() override
     {
+        saveLayout();
+        Panel::forwardKey = nullptr;
+        Panel::forwardKeyState = nullptr;
         studio.engine.getPluginManager().knownPluginList.removeChangeListener (this);
         studio.engine.getDeviceManager().deviceManager.removeMidiInputDeviceCallback ({}, this);
         if (cleanExit)
@@ -287,7 +317,7 @@ public:
         // Hint bar (FL shows help for whatever is under the mouse here).
         g.setColour (Theme::lcd);
         g.fillRoundedRectangle (hintArea.toFloat(), 3.0f);
-        g.setColour (Theme::textDim);
+        g.setColour (juce::Time::getMillisecondCounter() < flashUntil ? Theme::accent : Theme::textDim);
         g.setFont (Theme::font (12.0f));
         g.drawText (hint, hintArea.reduced (8, 0), juce::Justification::centredLeft, true);
 
@@ -300,7 +330,7 @@ public:
 
         g.setColour (Theme::textDim);
         g.setFont (Theme::font (11.0f));
-        g.drawText ("CPU " + juce::String (juce::roundToInt (cpu * 100.0)) + "%", cpuArea, juce::Justification::centred);
+        g.drawText (statusText, cpuArea, juce::Justification::centred);
     }
 
     void resized() override
@@ -308,7 +338,7 @@ public:
         auto r = getLocalBounds();
         auto top = r.removeFromTop (menuHeight);
         menuBar.setBounds (top.removeFromLeft (260));
-        cpuArea = top.removeFromRight (70);
+        cpuArea = top.removeFromRight (200);
         hintArea = top.reduced (4, 3);
 
         auto bar = r.removeFromTop (toolbarHeight).reduced (6, 6);
@@ -342,6 +372,10 @@ public:
         if (browserVisible)
             browser.setBounds (r.removeFromLeft (230));
         workspace.setBounds (r);
+
+        if (! workspace.getBounds().isEmpty())
+            for (auto* p : std::exchange (maximiseWhenSized, {}))
+                p->setMaximised (true);
     }
 
     //==========================================================================
@@ -349,6 +383,9 @@ public:
 
     bool keyPressed (const juce::KeyPress& key) override
     {
+        if (juce::Component::getCurrentlyModalComponent() != nullptr) // dialogs, menus, the F8 picker
+            return false;
+
         const auto mods = key.getModifiers();
         const bool cmd = mods.isCommandDown();
         const int code = key.getKeyCode();
@@ -359,17 +396,25 @@ public:
         if (cmd && (code == 'Y' || (code == 'Z' && mods.isShiftDown()))) { studio.undo().redo(); return true; }
         if (cmd && code == 'Z')                       { studio.undo().undo(); return true; }
         if (cmd && code == 'R')                       { showExportDialog(); return true; }
+
+        // FL: numpad +/- (or Ctrl+Up/Down) = next / previous pattern.
+        const bool ctrl = (cmd || mods.isCtrlDown()) && ! mods.isShiftDown();
+        if (key.isKeyCode (juce::KeyPress::numberPadAdd) || (ctrl && key.isKeyCode (juce::KeyPress::upKey)))        { stepPattern (1); return true; }
+        if (key.isKeyCode (juce::KeyPress::numberPadSubtract) || (ctrl && key.isKeyCode (juce::KeyPress::downKey))) { stepPattern (-1); return true; }
+
         if (isFrontPanel (*pianoRollPanel) && pianoRoll->handleKey (key))
             return true;
         if (isFrontPanel (*playlistPanel) && playlist->handleKey (key))
             return true;
-        if (key == juce::KeyPress::F5Key)             { playlistPanel->toggle(); return true; }
-        if (key == juce::KeyPress::F9Key)             { mixerPanel->toggle(); return true; }
+        if (key.isKeyCode (juce::KeyPress::F5Key))    { playlistPanel->toggle(); return true; }
+        if (key.isKeyCode (juce::KeyPress::F6Key))    { channelRackPanel->toggle(); return true; }
+        if (key.isKeyCode (juce::KeyPress::F7Key))    { pianoRollPanel->toggle(); return true; }
+        if (key.isKeyCode (juce::KeyPress::F8Key))    { if (mods.isAltDown()) toggleBrowser(); else showSoundPicker(); return true; }
+        if (key.isKeyCode (juce::KeyPress::F9Key))    { mixerPanel->toggle(); return true; }
+        if (key.isKeyCode (juce::KeyPress::F10Key))   { showAudioSettings(); return true; }
+        if (key.isKeyCode (juce::KeyPress::F12Key))   { closeAllWindows(); return true; }
+        if (key.isKeyCode (juce::KeyPress::tabKey))   { cycleWindows(); return true; }
         if (key == juce::KeyPress::spaceKey)          { studio.togglePlay(); return true; }
-        if (key == juce::KeyPress::F7Key)             { pianoRollPanel->toggle(); return true; }
-        if (key == juce::KeyPress::F6Key)             { channelRackPanel->toggle(); return true; }
-        if (key == juce::KeyPress::F8Key && mods.isAltDown()) { toggleBrowser(); return true; }
-        if (key == juce::KeyPress::F10Key)            { showAudioSettings(); return true; }
         if (key.getKeyCode() == 'L' && mods.isAnyModifierKeyDown() == false)
         {
             patSongButton.setToggleState (! patSongButton.getToggleState(), juce::sendNotification);
@@ -433,6 +478,9 @@ public:
         {
             m.addItem ("Audio settings... (F10)", [this] { showAudioSettings(); });
             m.addItem ("Manage plugins...", [this] { showPluginManager(); });
+            m.addItem ("Add a sound... (F8)", [this] { showSoundPicker(); });
+            m.addSeparator();
+            m.addItem ("Keyboard shortcuts...", [this] { showShortcuts(); });
         }
         return m;
     }
@@ -487,7 +535,10 @@ public:
     void openFile (const juce::File& file)
     {
         if (studio.load (file))
+        {
             addToRecent (file);
+            reportMissingFiles();
+        }
         else
             juce::AlertWindow::showAsync (juce::MessageBoxOptions().withIconType (juce::MessageBoxIconType::WarningIcon)
                                               .withTitle ("Couldn't open project").withMessage (file.getFullPathName()).withButton ("OK"),
@@ -711,10 +762,150 @@ private:
         flashHint ("'" + p.name + "' is a " + p.group + " preset: select a channel or mixer insert that uses " + p.group);
     }
 
-    void flashHint (const juce::String& text)
+    void flashHint (const juce::String& text, int ms = 5000)
     {
         flashText = text;
-        flashUntil = juce::Time::getMillisecondCounter() + 5000;
+        flashUntil = juce::Time::getMillisecondCounter() + (juce::uint32) ms;
+    }
+
+    void reportMissingFiles()
+    {
+        const auto& missing = studio.getMissingFiles();
+        if (missing.isEmpty())
+            return;
+        int plugins = 0;
+        for (auto& m : missing)
+            plugins += m.startsWith ("plugin:") ? 1 : 0;
+        juce::StringArray parts;
+        if (missing.size() > plugins) parts.add (juce::String (missing.size() - plugins) + " sample" + (missing.size() - plugins == 1 ? "" : "s"));
+        if (plugins > 0)              parts.add (juce::String (plugins) + " plugin" + (plugins == 1 ? "" : "s"));
+        flashHint (parts.joinIntoString (" and ") + " could not be found: " + missing.joinIntoString (", "), 12000);
+    }
+
+    //==========================================================================
+    // Windows
+
+    juce::Array<Panel*> getAllPanels() const
+    {
+        juce::Array<Panel*> all { playlistPanel.get(), channelRackPanel.get(), pianoRollPanel.get(), mixerPanel.get() };
+        for (auto* list : { &effectPanels, &channelPanels, &editorPanels })
+            all.addArray (*list);
+        return all;
+    }
+
+    void closeAllWindows()
+    {
+        for (auto* p : getAllPanels())
+            p->close();
+    }
+
+    // FL Tab: the window at the back comes to the front, so repeated presses cycle through them.
+    void cycleWindows()
+    {
+        for (auto* c : workspace.getChildren())
+            if (auto* p = dynamic_cast<Panel*> (c); p != nullptr && p->isVisible())
+            {
+                p->show();
+                workspace.repaint();
+                return;
+            }
+    }
+
+    void stepPattern (int delta)
+    {
+        auto patterns = studio.getPatterns();
+        const int index = patterns.indexOf (studio.getCurrentPatternState()) + delta;
+        if (juce::isPositiveAndBelow (index, patterns.getNumChildren()))
+            studio.setCurrentPattern (patterns.getChild (index)[IDs::id]);
+    }
+
+    void showShortcuts()
+    {
+        juce::DialogWindow::LaunchOptions o;
+        o.content.setOwned (new Shortcuts::Help());
+        o.dialogTitle = "Keyboard shortcuts";
+        o.dialogBackgroundColour = Theme::panelDark;
+        o.escapeKeyTriggersCloseButton = true;
+        o.useNativeTitleBar = true;
+        o.resizable = false;
+        o.launchAsync();
+    }
+
+    // FL F8 "plugin picker": synth sounds, our instruments, SFZ/SF2 files and installed plugins.
+    void showSoundPicker()
+    {
+        std::vector<SoundPicker::Item> items;
+        auto added = [this] (int id)
+        {
+            if (id == 0)
+                return;
+            studio.selectChannel (id);
+            channelRackPanel->show();
+            flashHint ("Added '" + studio.getChannel (id)[IDs::name].toString() + "' to the channel rack");
+        };
+
+        items.push_back ({ "Sampler", "Instrument", [this, added] { added (studio.addSamplerChannel (DrumKit::getDrumsFolder().getChildFile ("Kick.wav"))); } });
+        items.push_back ({ "4-OSC Synth", "Instrument", [this, added] { added (studio.addSynthChannel()); } });
+        items.push_back ({ "FM Synth", "Instrument", [this, added] { added (studio.addFmSynthChannel()); } });
+        items.push_back ({ "Drum pad", "Instrument", [this, added] { added (studio.addDrumPadChannel()); } });
+        for (auto& sound : Presets::allSynthSounds())
+            items.push_back ({ sound.preset->name, "Synth - " + sound.preset->category,
+                               [this, added, name = sound.preset->name] { added (studio.addPresetChannel (name)); } });
+        for (auto& f : MultiSampler::getInstrumentsFolder().findChildFiles (juce::File::findFiles, true, "*.sfz;*.sf2"))
+            items.push_back ({ f.getFileNameWithoutExtension(), f.getFileExtension().substring (1).toUpperCase(),
+                               [this, added, f] { added (studio.addInstrumentChannel (f)); } });
+        for (auto& d : studio.getKnownPlugins (true))
+            items.push_back ({ d.name, d.pluginFormatName, [this, d] { addPlugin (d); } });
+
+        auto area = workspace.getBounds().withHeight (1).withSizeKeepingCentre (40, 1).translated (0, 4);
+        juce::CallOutBox::launchAsynchronously (std::make_unique<SoundPicker> (std::move (items)), area, this);
+    }
+
+    //==========================================================================
+    // Window layout remembered across launches (not for --snapshot / --selftest runs).
+
+    static bool isDevRun() { return juce::JUCEApplicationBase::getCommandLineParameters().contains ("--"); }
+
+    void saveLayout()
+    {
+        if (isDevRun())
+            return;
+        juce::XmlElement xml ("LAYOUT");
+        xml.setAttribute ("browser", browserVisible);
+        for (auto [name, panel] : namedPanels())
+        {
+            auto* e = xml.createNewChildElement ("PANEL");
+            e->setAttribute ("name", name);
+            e->setAttribute ("open", panel->isOpen());
+            e->setAttribute ("bounds", panel->getNormalBounds().toString());
+            e->setAttribute ("maximised", panel->isMaximised());
+        }
+        settings.setValue ("layout", &xml);
+        settings.saveIfNeeded();
+    }
+
+    void restoreLayout()
+    {
+        auto xml = settings.getXmlValue ("layout");
+        if (xml == nullptr || isDevRun())
+            return;
+        browserVisible = xml->getBoolAttribute ("browser", true);
+        for (auto [name, panel] : namedPanels())
+            if (auto* e = xml->getChildByAttribute ("name", name))
+            {
+                const auto r = juce::Rectangle<int>::fromString (e->getStringAttribute ("bounds"));
+                if (r.getWidth() >= 200 && r.getHeight() >= 120)
+                    panel->setBounds (r.withPosition (juce::jmax (0, r.getX()), juce::jmax (0, r.getY())));
+                panel->setVisible (e->getBoolAttribute ("open"));
+                if (e->getBoolAttribute ("maximised"))
+                    maximiseWhenSized.add (panel);
+            }
+    }
+
+    std::vector<std::pair<const char*, Panel*>> namedPanels() const
+    {
+        return { { "playlist", playlistPanel.get() }, { "channelRack", channelRackPanel.get() },
+                 { "pianoRoll", pianoRollPanel.get() }, { "mixer", mixerPanel.get() } };
     }
 
     void showTimeSigMenu()
@@ -727,6 +918,8 @@ private:
 
     bool isFrontPanel (const Panel& p) const
     {
+        if (p.isDetached())
+            return p.isDetachedAndActive();
         if (! p.isVisible())
             return false;
         for (int i = workspace.getNumChildComponents(); --i >= 0;)
@@ -849,13 +1042,18 @@ private:
         const int step = (int) std::floor (inBar / Studio::stepBeats) + 1;
         const int tick = (int) std::floor (std::fmod (inBar, Studio::stepBeats) / Studio::stepBeats * 24.0);
         const auto newTime = juce::String::formatted ("%d:%02d:%02d", bar, step, tick);
-        const double newCpu = studio.engine.getDeviceManager().getCpuUsage();
+        // CPU, RAM, voices: a few times a second is plenty.
+        auto newStatus = statusText;
+        if (ticks % 8 == 0)
+            newStatus = "CPU " + juce::String (juce::roundToInt (studio.engine.getDeviceManager().getCpuUsage() * 100.0)) + "%   RAM "
+                      + juce::String (juce::roundToInt ((double) getProcessMemory() / (1024.0 * 1024.0))) + " MB   Voices "
+                      + juce::String (studio.getActiveVoices());
 
-        if (newHint != hint || newTime != timeText || std::abs (newCpu - cpu) > 0.01)
+        if (newHint != hint || newTime != timeText || newStatus != statusText)
         {
             hint = newHint;
             timeText = newTime;
-            cpu = newCpu;
+            statusText = newStatus;
             repaint (0, 0, getWidth(), menuHeight + toolbarHeight);
         }
 
@@ -876,7 +1074,8 @@ private:
                 window->setName (title);
         }
 
-        tempo.setValue (studio.getBpm());
+        // With tempo changes, show the tempo at the playhead while playing (FL does too).
+        tempo.setValue (studio.isPlaying() && studio.getTempoChanges().getNumChildren() > 0 ? studio.getBpmAtBeat (beats) : studio.getBpm());
         const auto sig = juce::String (studio.getTimeSigNumerator()) + "/4";
         if (timeSigButton.getButtonText() != sig)
             timeSigButton.setButtonText (sig);
@@ -924,8 +1123,8 @@ private:
                                           .withButton ("Recover").withButton ("Discard"),
                                       [this] (int result)
                                       {
-                                          if (result == 1)
-                                              studio.load (getAutosaveFile(), true);
+                                          if (result == 1 && studio.load (getAutosaveFile(), true))
+                                              reportMissingFiles();
                                           getAutosaveFile().deleteFile();
                                       });
     }
@@ -974,6 +1173,7 @@ public:
         if (! editorPanels.isEmpty())
             editorPanels.getLast()->setTopLeftPosition (100, 330);
     }
+    void debugOpenPicker()       { showSoundPicker(); }
     void debugOpenFirstChannel() { toggleChannelWindow (studio.getChannels().getChild (0)[IDs::id]); }
     void debugOpenDrumPad()      { toggleChannelWindow (studio.addDrumPadChannel()); }
     void debugTemplate (const juce::String& name) { studio.newProjectFromTemplate (name); }
@@ -1055,9 +1255,9 @@ private:
     juce::TextButton timeSigButton { "4/4" };
 
     juce::Rectangle<int> hintArea, timeArea, cpuArea;
-    juce::String hint, timeText, flashText;
+    juce::String hint, timeText, flashText, statusText;
     juce::uint32 flashUntil = 0;
-    double cpu = 0.0;
+    juce::Array<Panel*> maximiseWhenSized;
 };
 
 //==============================================================================
@@ -1070,6 +1270,7 @@ public:
         setUsingNativeTitleBar (true);
         setContentOwned (new MainComponent (engine), true);
         setResizable (true, true);
+        setResizeLimits (960, 600, 16384, 16384);
         centreWithSize (getWidth(), getHeight());
         setVisible (true);
     }
@@ -1108,6 +1309,11 @@ namespace SelfTest
         bool ok = true;
         const int kick = s.getChannels().getChild (0)[IDs::id];
 
+        {
+            Studio fresh (engine);
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (300); // let Tracktion's async updates run
+            ok &= check (! fresh.isDirty(), "a new project isn't 'unsaved' once the engine settles");
+        }
         ok &= check (s.getChannels().getNumChildren() == 4, "default project has 4 channels");
         ok &= check (countNotes (s, kick) == 0, "new pattern is empty");
 
@@ -1125,6 +1331,54 @@ namespace SelfTest
 
         s.setStep (kick, 31, true);
         ok &= check (std::abs (s.getPatternLengthBeats (s.getCurrentPatternState()) - 8.0) < 1.0e-6, "pattern grows to 2 bars");
+
+        {
+            // Editing one channel only rewrites that channel's engine notes.
+            const int clap = s.getChannels().getChild (1)[IDs::id];
+            s.setStep (clap, 4, true);
+            countNotes (s, kick);
+            struct Counter : juce::ValueTree::Listener
+            {
+                int changes = 0;
+                void valueTreeChildAdded (juce::ValueTree&, juce::ValueTree&) override        { ++changes; }
+                void valueTreeChildRemoved (juce::ValueTree&, juce::ValueTree&, int) override { ++changes; }
+            } kickChanges, clapChanges;
+            auto kickState = s.getTrack (kick)->state, clapState = s.getTrack (clap)->state;
+            kickState.addListener (&kickChanges);
+            clapState.addListener (&clapChanges);
+            s.setStep (kick, 6, true);
+            s.regenerateNow();
+            kickState.removeListener (&kickChanges);
+            clapState.removeListener (&clapChanges);
+            ok &= check (kickChanges.changes > 0 && clapChanges.changes == 0, "regen rewrites only the edited channel");
+            s.setStep (kick, 6, false);
+            s.setStep (clap, 4, false);
+        }
+
+        {
+            // Workspace windows: maximize / restore, detach into a native window and back.
+            juce::Component workspace;
+            workspace.setSize (800, 600);
+            auto panel = std::make_unique<Panel> ("Test", std::make_unique<juce::Label> ("content", "hello"));
+            auto* content = &panel->getContent();
+            workspace.addAndMakeVisible (*panel);
+            panel->setBounds (10, 20, 300, 200);
+            panel->setMaximised (true);
+            const bool maximised = panel->getBounds() == workspace.getLocalBounds();
+            workspace.setSize (900, 700);
+            const bool follows = panel->getBounds() == workspace.getLocalBounds();
+            panel->setMaximised (false);
+            ok &= check (maximised && follows && panel->getBounds() == juce::Rectangle<int> (10, 20, 300, 200), "window maximize follows the workspace, restore puts it back");
+            panel->setDetached (true);
+            const bool detached = panel->isDetached() && panel->isOpen() && ! panel->isVisible() && content->getParentComponent() != panel.get()
+                                  && content->isShowing();
+            panel->setDetached (false);
+            ok &= check (detached && ! panel->isDetached() && content->getParentComponent() == panel.get() && panel->isVisible(),
+                         "window detaches into its own window and docks back");
+            panel->setDetached (true);
+            panel = nullptr; // deleting a detached window must not leave its native window behind
+            ok &= check (juce::TopLevelWindow::getNumTopLevelWindows() == 0, "deleting a detached window closes it");
+        }
 
         {
             // Song mode: two placements of the 5-note pattern -> 10 engine notes.
@@ -1186,6 +1440,7 @@ namespace SelfTest
             s.removePlugin (*eq);
             ok &= check (Effects::airwindows().size() > 150, "Airwindows library available");
 
+           #if JUCE_MAC
             // Third-party hosting: load one of Apple's built-in Audio Units as an effect.
             juce::AudioUnitPluginFormat au;
             juce::OwnedArray<juce::PluginDescription> found;
@@ -1205,6 +1460,7 @@ namespace SelfTest
                 if (p != nullptr) s.removePlugin (*p);
                 engine.getPluginManager().knownPluginList.removeType (*found[0]);
             }
+           #endif
         }
 
         {
@@ -1842,11 +2098,271 @@ namespace SelfTest
             loaded.setStep (kick, 2, true);
             ok &= check (countNotes (loaded, kick) == savedNotes + 1, "loaded project still drives the engine");
         }
+        {
+            // Fuzz: broken, foreign, old and hostile project files load gracefully or not at all.
+            const auto dir = juce::File::createTempFile ("fuzz");
+            dir.createDirectory();
+            const auto valid = file.loadFileAsString();
+            Studio f (engine);
+            double slowest = 0.0;
+            auto tryLoad = [&] (const juce::String& text)
+            {
+                const auto x = dir.getChildFile ("fuzz" + Studio::fileExtension);
+                x.replaceWithText (text);
+                const auto t = juce::Time::getMillisecondCounterHiRes();
+                const bool loaded = f.load (x);
+                if (loaded)
+                    f.regenerateNow();
+                slowest = juce::jmax (slowest, juce::Time::getMillisecondCounterHiRes() - t);
+                return loaded;
+            };
+            auto withStudio = [&] (std::function<void (juce::XmlElement&)> change)
+            {
+                auto xml = juce::parseXML (valid);
+                change (*xml->getChildByName ("STUDIO"));
+                return xml->toString();
+            };
+
+            juce::Random rng (1234);
+            juce::MemoryBlock garbage (4000);
+            rng.fillBitsRandomly (garbage.getData(), garbage.getSize());
+            const bool rejected = ! tryLoad ("") && ! tryLoad (valid.substring (0, valid.length() / 2)) && ! tryLoad (garbage.toString())
+                                  && ! tryLoad ("<FOO><STUDIO/></FOO>") && ! tryLoad (valid.replace ("<STUDIO", "<NOTSTUDIO").replace ("</STUDIO>", "</NOTSTUDIO>"))
+                                  && ! f.load (dir.getChildFile ("missing" + Studio::fileExtension));
+            ok &= check (rejected && f.getChannels().getNumChildren() == 4,
+                         "fuzz: empty, truncated, garbage, foreign XML, no STUDIO, missing file -> rejected, open project kept");
+
+            const bool old = tryLoad (withStudio ([] (juce::XmlElement& st)
+            {
+                for (auto name : { "INSERTS", "MAPPINGS", "TEMPOS" })
+                    st.removeChildElement (st.getChildByName (name), true);
+            }));
+            ok &= check (old && f.getChannels().getNumChildren() == savedChannels && f.getInserts().getNumChildren() == Studio::numInserts,
+                         "fuzz: older project shape (no INSERTS/MAPPINGS/TEMPOS) loads");
+            ok &= check (tryLoad ("<EDIT><STUDIO currentPattern=\"7\"><CHANNELS><CHANNEL id=\"3\" track=\"999\"/></CHANNELS></STUDIO></EDIT>")
+                             && f.getCurrentPatternState().isValid() && f.getInserts().getNumChildren() == Studio::numInserts,
+                         "fuzz: minimal hand-written project loads (pattern + inserts created)");
+
+            const bool huge = tryLoad (withStudio ([] (juce::XmlElement& st)
+            {
+                st.setAttribute ("swing", "inf");
+                st.setAttribute ("nextId", -5);
+                st.setAttribute ("currentPattern", 123456);
+                for (auto* ch : st.getChildByName ("CHANNELS")->getChildIterator())
+                {
+                    ch->setAttribute ("arp", 1);
+                    ch->setAttribute ("arpRate", "1e-300");
+                    ch->setAttribute ("insert", 999);
+                }
+                for (auto* p : st.getChildByName ("PATTERNS")->getChildIterator())
+                    for (auto* n : p->getChildIterator())
+                    {
+                        n->setAttribute ("start", "1e308");
+                        n->setAttribute ("length", "nan");
+                        n->setAttribute ("key", 99999);
+                        n->setAttribute ("velocity", -3);
+                    }
+                auto* tempo = st.getChildByName ("TEMPOS")->createNewChildElement ("TEMPOCHANGE");
+                tempo->setAttribute ("pos", "1e300");
+                tempo->setAttribute ("bpm", 0);
+            }).replace ("numerator=\"4\"", "numerator=\"0\""));
+            bool clamped = huge;
+            for (auto p : f.getPatterns())
+                for (auto n : p)
+                    clamped &= (double) n[IDs::start] <= 4.0 * 9999.0 && (int) n[IDs::key] <= 127 && (int) n[IDs::velocity] >= 1 && std::isfinite ((double) n[IDs::length]);
+            ok &= check (clamped && f.getCurrentPatternState().isValid() && f.getSwing() <= 1.0 && slowest < 5000.0,
+                         "fuzz: huge / NaN / negative numbers are clamped (slowest load " + juce::String ((int) slowest) + " ms)");
+
+            const juce::String ghost = "/nonexistent/untitledstudio/Ghost Kick.wav";
+            auto withGhosts = juce::parseXML (valid);
+            withGhosts->getChildByName ("STUDIO")->getChildByName ("CHANNELS")->getChildElement (0)->setAttribute ("file", ghost);
+            auto* plugin = withGhosts->getChildByName ("TRACK")->createNewChildElement ("PLUGIN");
+            plugin->setAttribute ("type", te::ExternalPlugin::xmlTypeName);
+            plugin->setAttribute ("name", "Ghost Synth");
+            plugin->setAttribute ("filename", "/nonexistent/Ghost.vst3");
+            const bool missing = tryLoad (withGhosts->toString());
+            juce::String plugins;
+            for (auto& m : f.getMissingFiles())
+                if (m.startsWith ("plugin:")) plugins << m;
+            ok &= check (missing && f.getMissingFiles().contains (ghost) && plugins.isNotEmpty(),
+                         "fuzz: missing samples + plugins load and are reported (" + juce::String (f.getMissingFiles().size()) + " missing)");
+
+            // Random mutations: corrupt bytes, and values / elements inside the model.
+            const juce::StringArray nasty { "", "-1", "0", "1e308", "-1e308", "nan", "inf", "abc", "2147483647", "-99999", "0.000001" };
+            int loads = 0, total = 0;
+            for (int i = 0; i < 8; ++i, ++total)
+            {
+                auto bytes = valid.toStdString();
+                for (int k = 0; k < 20; ++k)
+                    bytes[(size_t) rng.nextInt ((int) bytes.size())] = (char) (32 + rng.nextInt (95));
+                loads += tryLoad (bytes) ? 1 : 0;
+            }
+            for (int i = 0; i < 16; ++i, ++total)
+            {
+                loads += tryLoad (withStudio ([&] (juce::XmlElement& st)
+                {
+                    juce::Array<juce::XmlElement*> all;
+                    std::function<void (juce::XmlElement&)> collect = [&] (juce::XmlElement& e)
+                    {
+                        all.add (&e);
+                        for (auto* c : e.getChildIterator()) collect (*c);
+                    };
+                    collect (st);
+                    for (int k = 0; k < 6; ++k)
+                    {
+                        auto* e = all[rng.nextInt (all.size())];
+                        if (e->getNumAttributes() > 0)
+                            e->setAttribute (e->getAttributeName (rng.nextInt (e->getNumAttributes())), nasty[rng.nextInt (nasty.size())]);
+                    }
+                    if (auto* victim = all[rng.nextInt (all.size())]; victim != &st && rng.nextBool())
+                        for (auto* parent : all)
+                            if (parent->containsChildElement (victim))
+                            {
+                                parent->removeChildElement (victim, true);
+                                break;
+                            }
+                })) ? 1 : 0;
+            }
+            ok &= check (slowest < 5000.0, "fuzz: " + juce::String (total) + " random mutations, no crash or hang (" + juce::String (loads)
+                                               + " loaded, the rest rejected; slowest " + juce::String ((int) slowest) + " ms)");
+            dir.deleteRecursively();
+        }
+
         file.deleteFile();
         instrDir.deleteRecursively();
 
         std::cout << (ok ? "PASS" : "FAILED") << std::endl;
         return ok;
+    }
+
+    //==========================================================================
+    // `untitledstudio --stress`: 100 channels, 50 effects, 16 bars. Prints a load report.
+    inline void stress (te::Engine& engine)
+    {
+        using Clock = std::chrono::steady_clock;
+        auto msSince = [] (Clock::time_point t) { return std::chrono::duration<double, std::milli> (Clock::now() - t).count(); };
+
+        Studio s (engine);
+        s.newProjectFromTemplate ("Empty");
+        auto start = Clock::now();
+
+        const auto drums = DrumKit::getDrumsFolder();
+        const juce::StringArray samples { "Kick", "Clap", "Hat", "Snare", "Open Hat", "808", "Cowbell", "Crash" };
+        juce::StringArray oscSounds, fmSounds;
+        for (auto& sound : Presets::allSynthSounds())
+            (sound.pluginType == FMSynthPlugin::xmlTypeName ? fmSounds : oscSounds).add (sound.preset->name);
+
+        auto pattern = s.getCurrentPatternState();
+        for (int i = 0; i < 100; ++i)
+        {
+            const int kind = i % 4;
+            const int id = kind == 0 ? s.addSamplerChannel (drums.getChildFile (samples[i / 4 % samples.size()] + ".wav"))
+                         : kind == 1 ? s.addPresetChannel (oscSounds[i / 4 % oscSounds.size()])
+                         : kind == 2 ? s.addPresetChannel (fmSounds[i / 4 % fmSounds.size()])
+                                     : s.addInstrumentChannel (drums.getChildFile (samples[(i / 4 + 3) % samples.size()] + ".wav"));
+            s.setChannelInsert (id, 1 + i % Studio::numInserts);
+            if (kind == 0 || kind == 3)
+                for (int beat = 0; beat < 16; ++beat)
+                    s.addNote (pattern, id, beat + (i % 3) * Studio::stepBeats, Studio::stepBeats, 60, 100);
+            else
+                for (int n = 0; n < 8; ++n)
+                    s.addNote (pattern, id, n * 2.0, 1.5, 48 + (i * 5 + n * 3) % 24, 90);
+        }
+
+        const char* fxTypes[] = { te::EqualiserPlugin::xmlTypeName, te::CompressorPlugin::xmlTypeName, te::ReverbPlugin::xmlTypeName,
+                                  te::DelayPlugin::xmlTypeName, te::AirWindowsButterComp2::xmlTypeName };
+        int effects = 0;
+        for (int i = 0; i < 50; ++i)
+            if (auto p = s.addEffect (1 + i % Studio::numInserts, fxTypes[i % 5]))
+            {
+                Effects::prepareNew (*p);
+                ++effects;
+            }
+
+        for (int bar = 0; bar < 16; bar += 4)
+            s.addPatternClip (pattern[IDs::id], 0, bar * 4.0);
+        s.setSongMode (true);
+        const double buildMs = msSince (start);
+
+        int notes = 0;
+        for (auto n : s.getCurrentPatternState()) notes += n.hasType (IDs::NOTE) ? 1 : 0;
+
+        start = Clock::now();
+        s.regenerateNow();
+        const double regenMs = msSince (start);
+        start = Clock::now();
+        s.getCurrentPatternState().getChild (0).setProperty (IDs::velocity, 99, nullptr); // one-note edit
+        s.regenerateNow();
+        const double editRegenMs = msSince (start);
+
+        std::cout << "Stress project: " << s.getChannels().getNumChildren() << " channels, " << effects << " effects, "
+                  << notes << " notes per pattern, " << s.getSongLengthBeats() / 4.0 << " bars at " << s.getBpm() << " BPM" << std::endl;
+        std::cout << "  build " << juce::roundToInt (buildMs) << " ms, full regen " << juce::String (regenMs, 1)
+                  << " ms, regen after a one-note edit " << juce::String (editRegenMs, 1) << " ms" << std::endl;
+
+        // (a) Offline render through the Exporter.
+        const double songSeconds = s.getSongLengthBeats() * 60.0 / s.getBpm();
+        const auto wav = juce::File::createTempFile (".wav");
+        Exporter::Settings es;
+        es.tailSeconds = 0.0;
+        start = Clock::now();
+        const bool rendered = Exporter::exportMix (s, es, wav);
+        const double renderMs = msSince (start);
+        wav.deleteFile();
+        std::cout << "  offline render (512 blocks): " << (rendered ? "" : "FAILED ") << juce::String (songSeconds, 1) << " s of audio in "
+                  << juce::String (renderMs / 1000.0, 2) << " s = " << juce::String (songSeconds * 1000.0 / renderMs, 2) << "x realtime" << std::endl;
+
+        // (b) The live playback graph, driven block by block like an audio device (256 @ 44.1 kHz).
+        constexpr int blockSize = 256;
+        constexpr double sampleRate = 44100.0;
+        auto& hosted = engine.getDeviceManager().getHostedAudioDeviceInterface();
+        te::HostedAudioDeviceInterface::Parameters hp;
+        hp.sampleRate = sampleRate;
+        hp.blockSize = blockSize;
+        hp.inputChannels = 0;
+        engine.getDeviceManager().setCpuLimitBeforeMuting (1000.0); // blocks are pumped back to back, don't let it mute
+        hosted.initialise (hp);
+        hosted.prepareToPlay (sampleRate, blockSize);
+        engine.getDeviceManager().dispatchPendingUpdates();
+        s.transport().freePlaybackContext();
+        s.transport().ensureContextAllocated();
+        s.regenerateNow();
+        s.transport().setPosition (0s);
+        s.transport().play (false);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (300);
+
+        juce::AudioBuffer<float> buffer (2, blockSize);
+        juce::MidiBuffer midi;
+        for (int i = 0; i < 200; ++i) // warm up: graph build, sample loading
+            hosted.processBlock (buffer, midi);
+
+        const double budgetMs = blockSize * 1000.0 / sampleRate;
+        const int numBlocks = (int) (songSeconds * sampleRate / blockSize);
+        std::vector<double> times;
+        times.reserve ((size_t) numBlocks);
+        float peak = 0.0f;
+        for (int i = 0; i < numBlocks; ++i)
+        {
+            buffer.clear();
+            start = Clock::now();
+            hosted.processBlock (buffer, midi);
+            times.push_back (msSince (start));
+            peak = juce::jmax (peak, buffer.getMagnitude (0, blockSize));
+        }
+        s.transport().stop (false, false);
+
+        auto sorted = times;
+        std::sort (sorted.begin(), sorted.end());
+        const double avg = std::accumulate (times.begin(), times.end(), 0.0) / (double) times.size();
+        const auto pct = [budgetMs] (double ms) { return juce::String (ms / budgetMs * 100.0, 1) + "%"; };
+        const auto over = std::count_if (times.begin(), times.end(), [budgetMs] (double t) { return t > budgetMs; });
+        std::cout << "  realtime graph, " << blockSize << " samples @ 44.1 kHz (budget " << juce::String (budgetMs, 2) << " ms, "
+                  << engine.getEngineBehaviour().getNumberOfCPUsToUseForAudio() << " audio threads), " << numBlocks << " blocks, peak "
+                  << juce::String (peak, 2) << ":" << std::endl;
+        std::cout << "    average " << juce::String (avg, 3) << " ms (" << pct (avg) << "), median " << pct (sorted[sorted.size() / 2])
+                  << ", 99th percentile " << pct (sorted[sorted.size() * 99 / 100]) << ", worst " << juce::String (sorted.back(), 3)
+                  << " ms (" << pct (sorted.back()) << ")" << std::endl;
+        std::cout << "    blocks over budget (would drop out): " << over << std::endl;
     }
 }
 
@@ -1890,6 +2406,13 @@ public:
         {
             const bool ok = SelfTest::run (*engine);
             setApplicationReturnValue (ok ? 0 : 1);
+            quit();
+            return;
+        }
+
+        if (commandLine.contains ("--stress"))
+        {
+            SelfTest::stress (*engine);
             quit();
             return;
         }
@@ -1940,14 +2463,20 @@ public:
                 if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
                     mc->debugOpenFirstChannel();
 
-            juce::Timer::callAfterDelay (2500, [this, file]
+            // --snapshot-scale 2 renders like a Retina display.
+            const float scale = commandLine.contains ("--snapshot-scale ")
+                                    ? juce::jlimit (0.5f, 4.0f, commandLine.fromFirstOccurrenceOf ("--snapshot-scale ", false, false).getFloatValue()) : 1.0f;
+            const bool picker = commandLine.contains ("--open-picker");
+            juce::Timer::callAfterDelay (2500, [this, file, scale, picker]
             {
+                if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()); mc != nullptr && picker)
+                    mc->debugOpenPicker(); // opened last: a callout closes itself when the app isn't in front
                 if (auto* c = mainWindow->getContentComponent())
                 {
                     juce::PNGImageFormat png;
                     file.deleteFile();
                     if (auto out = file.createOutputStream())
-                        png.writeImageToStream (c->createComponentSnapshot (c->getLocalBounds(), true, 1.0f), *out);
+                        png.writeImageToStream (c->createComponentSnapshot (c->getLocalBounds(), true, scale), *out);
                 }
                 quit();
             });

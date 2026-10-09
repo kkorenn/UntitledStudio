@@ -244,6 +244,7 @@ public:
         }
 
         projectFile = juce::File();
+        startsDirty = false;
         finishLoading();
     }
 
@@ -276,15 +277,82 @@ public:
     // asUntitled: used for crash recovery, so saving asks for a new location.
     bool load (const juce::File& file, bool asUntitled = false)
     {
+        // Only hand Tracktion something that is one of our projects.
+        if (auto xml = juce::parseXML (file); xml == nullptr || ! xml->hasTagName ("EDIT") || xml->getChildByName (IDs::STUDIO.toString()) == nullptr)
+            return false;
+
         auto loaded = te::loadEditFromFile (engine, file);
         if (loaded == nullptr || ! loaded->state.getChildWithName (IDs::STUDIO).isValid())
             return false;
 
+        sanitise (loaded->state.getChildWithName (IDs::STUDIO));
         setEdit (std::move (loaded));
         projectFile = asUntitled ? juce::File() : file;
+        startsDirty = asUntitled; // recovered autosave: unsaved until saved somewhere
         finishLoading();
-        dirty = asUntitled;
+        findMissingFiles();
         return true;
+    }
+
+    // Samples / plugins the last loaded project refers to that aren't there any more.
+    const juce::StringArray& getMissingFiles() const { return missingFiles; }
+
+    // Clamps a loaded (maybe hand-edited or corrupted) model into ranges the app can handle.
+    static void sanitise (juce::ValueTree studioState)
+    {
+        constexpr double maxBeats = 4.0 * 9999.0;
+        int maxId = 0;
+        std::function<void (juce::ValueTree)> walk = [&] (juce::ValueTree v)
+        {
+            auto clamp = [&v] (const juce::Identifier& id, double lo, double hi)
+            {
+                if (! v.hasProperty (id))
+                    return;
+                const double x = v[id];
+                const double fixed = std::isfinite (x) ? juce::jlimit (lo, hi, x) : lo;
+                if (! juce::exactlyEqual (fixed, x))
+                    v.setProperty (id, fixed, nullptr);
+            };
+
+            if (v.hasType (IDs::NOTE))
+            {
+                clamp (IDs::start, 0.0, maxBeats);       clamp (IDs::length, 1.0 / 64.0, maxBeats);
+                clamp (IDs::key, 0.0, 127.0);            clamp (IDs::velocity, 1.0, 127.0);
+            }
+            else if (v.hasType (IDs::PCLIP))
+            {
+                clamp (IDs::start, 0.0, maxBeats);       clamp (IDs::length, 1.0 / 64.0, maxBeats);
+                clamp (IDs::offset, 0.0, maxBeats);      clamp (IDs::lane, 0.0, 499.0);
+                clamp (IDs::pitch, -24.0, 24.0);         clamp (IDs::origBpm, 0.0, 522.0);
+            }
+            else if (v.hasType (IDs::POINT))
+            {
+                clamp (IDs::pos, 0.0, maxBeats);         clamp (IDs::value, 0.0, 1.0);    clamp (IDs::tension, -1.0, 1.0);
+            }
+            else if (v.hasType (IDs::CHANNEL))
+            {
+                clamp (IDs::arp, 0.0, 4.0);              clamp (IDs::arpRate, 0.25, 64.0);
+                clamp (IDs::arpOctaves, 1.0, 4.0);       clamp (IDs::arpGate, 5.0, 100.0);
+                clamp (IDs::insert, 0.0, numInserts);
+            }
+            else if (v.hasType (IDs::TEMPOCHANGE))
+            {
+                clamp (IDs::pos, stepBeats, maxBeats);   clamp (IDs::bpm, 10.0, 522.0);
+            }
+            else if (v.hasType (IDs::STUDIO))
+            {
+                clamp (IDs::swing, 0.0, 1.0);            clamp (IDs::loopStart, 0.0, maxBeats);   clamp (IDs::loopEnd, 0.0, maxBeats);
+            }
+
+            if (v.hasProperty (IDs::id))
+                maxId = juce::jmax (maxId, (int) v[IDs::id]);
+            for (auto child : v)
+                walk (child);
+        };
+        walk (studioState);
+
+        if ((int) studioState[IDs::nextId] <= maxId)
+            studioState.setProperty (IDs::nextId, maxId + 1, nullptr);
     }
 
     juce::File getProjectFile() const   { return projectFile; }
@@ -1230,7 +1298,7 @@ public:
     double getBarBeats() const
     {
         auto& sig = *edit->tempoSequence.getTimeSig (0);
-        return sig.numerator.get() * 4.0 / sig.denominator.get();
+        return juce::jlimit (1, 16, sig.numerator.get()) * 4.0 / juce::jlimit (1, 16, sig.denominator.get());
     }
 
     // FL-style auto length: at least one bar, rounded up to whole bars.
@@ -1371,6 +1439,16 @@ public:
     bool isMetronomeOn() const           { return edit->clickTrackEnabled.get(); }
     void setMetronome (bool on)          { edit->clickTrackEnabled = on; }
 
+    // Voices sounding in our own instruments (Instrument, drum pad, FM Synth).
+    int getActiveVoices() const
+    {
+        int n = 0;
+        for (auto p : te::getAllPlugins (*edit, false))
+            if (auto ms = dynamic_cast<MultiSamplerPlugin*> (p))  n += ms->voicesPlaying.load (std::memory_order_relaxed);
+            else if (auto fm = dynamic_cast<FMSynthPlugin*> (p))  n += fm->voicesPlaying.load (std::memory_order_relaxed);
+        return n;
+    }
+
     // Push model changes into the engine immediately (normally done async).
     void regenerateNow()
     {
@@ -1383,12 +1461,30 @@ private:
     void finishLoading()
     {
         ensureInserts();
+        if (! getCurrentPatternState().isValid())
+        {
+            if (getPatterns().getNumChildren() == 0)
+                addPattern ("Pattern 1");
+            setCurrentPattern (getPatterns().getChild (0)[IDs::id]);
+        }
         selectedChannel = getChannels().getChild (0)[IDs::id];
         updateMidiInputTarget();
         regenerateNow();
         undo().clearUndoHistory();
         undo().dispatchPendingMessages();
-        dirty = false;
+        dirty = startsDirty;
+
+        // Tracktion tidies new tracks/clips asynchronously as undoable steps; once those queued
+        // updates have run, clear again so a fresh or loaded project doesn't come up "unsaved".
+        juce::MessageManager::callAsync ([safe = juce::WeakReference<Studio> (this), generation = editGeneration]
+        {
+            if (safe != nullptr && safe->editGeneration == generation)
+            {
+                safe->undo().clearUndoHistory();
+                safe->undo().dispatchPendingMessages();
+                safe->dirty = safe->startsDirty;
+            }
+        });
     }
 
     void setEdit (std::unique_ptr<te::Edit> newEdit)
@@ -1419,6 +1515,24 @@ private:
         studio.addListener (this);
         ++changeCount;
         triggerAsyncUpdate();
+    }
+
+    void findMissingFiles()
+    {
+        missingFiles.clear();
+        std::function<void (const juce::ValueTree&)> walk = [&] (const juce::ValueTree& v)
+        {
+            for (auto id : { IDs::file, te::IDs::source, juce::Identifier ("sample") })
+                if (const auto path = v[id].toString(); juce::File::isAbsolutePath (path) && ! juce::File (path).exists())
+                    missingFiles.addIfNotAlreadyThere (path);
+            for (auto child : v)
+                walk (child);
+        };
+        walk (edit->state);
+
+        for (auto p : te::getAllPlugins (*edit, false))
+            if (auto ext = dynamic_cast<te::ExternalPlugin*> (p); ext != nullptr && ext->getAudioPluginInstance() == nullptr)
+                missingFiles.addIfNotAlreadyThere ("plugin: " + ext->getName());
     }
 
     int takeNextId()
@@ -1652,6 +1766,31 @@ private:
         }
     }
 
+    // Rewriting a sequence makes the engine rebuild its playback graph, so a channel's notes are
+    // only rewritten when they actually changed (editing one channel leaves the others alone).
+    static void writeNotes (te::MidiList& seq, std::vector<Arp::Note>& notes)
+    {
+        auto order = [] (const Arp::Note& a, const Arp::Note& b) { return std::tie (a.start, a.key, a.length, a.velocity) < std::tie (b.start, b.key, b.length, b.velocity); };
+        auto same = [] (const Arp::Note& a, const Arp::Note& b)
+        {
+            return std::abs (a.start - b.start) < 1.0e-9 && std::abs (a.length - b.length) < 1.0e-9 && a.key == b.key && a.velocity == b.velocity;
+        };
+
+        std::vector<Arp::Note> current;
+        current.reserve ((size_t) seq.getNotes().size());
+        for (auto* n : seq.getNotes())
+            current.push_back ({ n->getStartBeat().inBeats(), n->getLengthBeats().inBeats(), n->getNoteNumber(), n->getVelocity() });
+
+        std::sort (notes.begin(), notes.end(), order);
+        std::sort (current.begin(), current.end(), order);
+        if (std::equal (notes.begin(), notes.end(), current.begin(), current.end(), same))
+            return;
+
+        seq.clear (nullptr);
+        for (auto& n : notes)
+            seq.addNote (n.key, te::BeatPosition::fromBeats (n.start), te::BeatDuration::fromBeats (n.length), n.velocity, 0, nullptr);
+    }
+
     te::MidiClip* getDerivedClip (te::AudioTrack& track) const
     {
         for (auto clip : track.getClips())
@@ -1666,8 +1805,6 @@ private:
 
     void handleAsyncUpdate() override
     {
-        // ponytail: regenerates every channel on any change. Fine for hundreds of notes;
-        // switch to per-channel dirty flags if big projects get slow.
         syncTempoChanges();
         regeneratedBarBeats = getBarBeats();
         const bool song = isSongMode();
@@ -1680,6 +1817,47 @@ private:
 
         endBeats = juce::jmax (endBeats, getBarBeats());
 
+        // One pass over the notes, bucketed by channel (not one pass per channel).
+        std::map<int, int> arpModes;
+        for (auto channel : getChannels())
+            arpModes[(int) channel[IDs::id]] = channel[IDs::arp];
+        std::map<int, std::vector<Arp::Note>> byChannel;
+
+        // Notes of pattern `p` that fall inside [offset, offset + clipLength), placed at clipStart.
+        // Swing shifts odd steps (the arp swings its own output instead).
+        auto addNotes = [&] (const juce::ValueTree& p, double clipStart, double clipLength, double offset)
+        {
+            for (auto note : p)
+            {
+                const auto arpMode = arpModes.find ((int) note[IDs::channel]);
+                if (arpMode == arpModes.end())
+                    continue;
+
+                const double rel = (double) note[IDs::start] - offset;
+                if (rel < -1.0e-6 || rel >= clipLength - 1.0e-6)
+                    continue;
+
+                double start = note[IDs::start];
+                const double stepIndex = start / stepBeats;
+                if (arpMode->second == Arp::off && std::abs (stepIndex - std::round (stepIndex)) < 1.0e-4 && ((int) std::round (stepIndex)) % 2 == 1)
+                    start += swingShift;
+
+                byChannel[arpMode->first].push_back ({ clipStart + start - offset, juce::jmin ((double) note[IDs::length], clipLength - rel),
+                                                       (int) note[IDs::key], (int) note[IDs::velocity] });
+            }
+        };
+
+        if (song)
+        {
+            for (auto pc : getPlaylist())
+                if (isPatternClip (pc) && ! (bool) pc[IDs::muted])
+                    addNotes (getPattern (pc[IDs::pattern]), pc[IDs::start], pc[IDs::length], pc[IDs::offset]);
+        }
+        else
+        {
+            addNotes (pattern, 0.0, endBeats, 0.0);
+        }
+
         for (auto channel : getChannels())
         {
             auto track = getTrack (channel);
@@ -1691,45 +1869,8 @@ private:
                 continue;
 
             const int channelId = channel[IDs::id];
-            auto& seq = clip->getSequence();
-            seq.clear (nullptr);
-
             const int arpMode = channel[IDs::arp];
-            std::vector<Arp::Note> notes;
-
-            // Notes of pattern `p` that fall inside [offset, offset + clipLength), placed at clipStart.
-            // Swing shifts odd steps (the arp swings its own output instead).
-            auto addNotes = [&] (const juce::ValueTree& p, double clipStart, double clipLength, double offset)
-            {
-                for (auto note : p)
-                {
-                    if ((int) note[IDs::channel] != channelId)
-                        continue;
-
-                    const double rel = (double) note[IDs::start] - offset;
-                    if (rel < -1.0e-6 || rel >= clipLength - 1.0e-6)
-                        continue;
-
-                    double start = note[IDs::start];
-                    const double stepIndex = start / stepBeats;
-                    if (arpMode == Arp::off && std::abs (stepIndex - std::round (stepIndex)) < 1.0e-4 && ((int) std::round (stepIndex)) % 2 == 1)
-                        start += swingShift;
-
-                    notes.push_back ({ clipStart + start - offset, juce::jmin ((double) note[IDs::length], clipLength - rel),
-                                       (int) note[IDs::key], (int) note[IDs::velocity] });
-                }
-            };
-
-            if (song)
-            {
-                for (auto pc : getPlaylist())
-                    if (isPatternClip (pc) && ! (bool) pc[IDs::muted])
-                        addNotes (getPattern (pc[IDs::pattern]), pc[IDs::start], pc[IDs::length], pc[IDs::offset]);
-            }
-            else
-            {
-                addNotes (pattern, 0.0, endBeats, 0.0);
-            }
+            auto& notes = byChannel[channelId];
 
             if (arpMode != Arp::off)
             {
@@ -1743,8 +1884,7 @@ private:
                 }
             }
 
-            for (auto& n : notes)
-                seq.addNote (n.key, te::BeatPosition::fromBeats (n.start), te::BeatDuration::fromBeats (n.length), n.velocity, 0, nullptr);
+            writeNotes (clip->getSequence(), notes);
 
             if (channel[IDs::type].toString() == ChannelType::audio)
                 syncAudioClips (*track, channelId, song);
@@ -1780,7 +1920,8 @@ private:
     // A time signature change (or its undo) lives in the engine, so regenerate for it here.
     void changeListenerCallback (juce::ChangeBroadcaster*) override
     {
-        dirty = true;
+        if (undo().canUndo() || undo().canRedo()) // clearing the history isn't an edit
+            dirty = true;
         if (! juce::approximatelyEqual (getBarBeats(), regeneratedBarBeats))
             markChanged();
     }
@@ -1816,6 +1957,7 @@ private:
 
     std::unique_ptr<te::Edit> edit;
     juce::ValueTree studio;
+    juce::StringArray missingFiles;
     std::set<juce::String> automatedTargets;
     te::AutomatableParameter* learning = nullptr;
     bool recordAutomation = false, recording = false;
@@ -1824,8 +1966,9 @@ private:
     std::map<int, std::pair<double, int>> pendingNotes;
     int selectedChannel = 0;
     int changeCount = 0, editGeneration = 0;
-    bool dirty = false;
+    bool dirty = false, startsDirty = false;
     juce::File projectFile;
     double loopEndBeats = 4.0, regeneratedBarBeats = 4.0;
     const te::MPESourceID liveSourceId = te::createUniqueMPESourceID();
+    JUCE_DECLARE_WEAK_REFERENCEABLE (Studio)
 };
