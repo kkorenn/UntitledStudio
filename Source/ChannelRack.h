@@ -4,9 +4,34 @@
 #include "Widgets.h"
 
 // FL's Channel Rack: one row per channel with mute LED, pan, volume, name and step buttons.
-class ChannelRack : public juce::Component, private juce::Timer
+class ChannelRack : public juce::Component,
+                    public juce::DragAndDropTarget,
+                    public juce::FileDragAndDropTarget,
+                    private juce::Timer
 {
 public:
+    //==========================================================================
+    // FL: drop a sound on a channel to replace it, or on empty space to add a new channel.
+
+    bool isInterestedInDragSource (const SourceDetails& d) override { return d.description.toString().startsWith ("file:"); }
+    void itemDragMove (const SourceDetails& d) override              { setDropHighlight (d.localPosition); }
+    void itemDragExit (const SourceDetails&) override                { setDropHighlight ({ -1, -1 }); }
+
+    void itemDropped (const SourceDetails& d) override
+    {
+        dropFile (juce::File (d.description.toString().fromFirstOccurrenceOf ("file:", false, false)), d.localPosition);
+    }
+
+    bool isInterestedInFileDrag (const juce::StringArray&) override   { return true; }
+    void fileDragMove (const juce::StringArray&, int x, int y) override { setDropHighlight ({ x, y }); }
+    void fileDragExit (const juce::StringArray&) override            { setDropHighlight ({ -1, -1 }); }
+
+    void filesDropped (const juce::StringArray& files, int x, int y) override
+    {
+        for (int i = 0; i < files.size(); ++i)
+            dropFile (juce::File (files[i]), i == 0 ? juce::Point<int> (x, y) : juce::Point<int> (-1, -1));
+    }
+
     std::function<void (int channelId)> onOpenChannel;
 
     explicit ChannelRack (Studio& s) : studio (s)
@@ -360,6 +385,42 @@ private:
             studio.selectChannel (id);
         });
         m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (addButton));
+    }
+
+    int rowIndexAt (juce::Point<int> p) const
+    {
+        if (! viewport.getBounds().contains (p))
+            return -1;
+        const auto local = rowHolder.getLocalPoint (this, p);
+        const int i = local.y / rowHeight;
+        return local.y >= 0 && i < rows.size() ? i : -1;
+    }
+
+    void setDropHighlight (juce::Point<int> p)
+    {
+        const int index = rowIndexAt (p);
+        for (int i = 0; i < rows.size(); ++i)
+            rows[i]->setAlpha (index < 0 || i == index ? 1.0f : 0.55f);
+    }
+
+    void dropFile (const juce::File& file, juce::Point<int> position)
+    {
+        setDropHighlight ({ -1, -1 });
+        if (! file.existsAsFile())
+            return;
+
+        const int index = rowIndexAt (position);
+        if (index >= 0)
+        {
+            const int id = rows[index]->getChannelId();
+            if (studio.getChannel (id)[IDs::type].toString() == ChannelType::sampler)
+            {
+                studio.replaceSample (id, file);
+                return;
+            }
+        }
+
+        studio.selectChannel (studio.addSamplerChannel (file));
     }
 
     static constexpr int headerHeight = 28, footerHeight = 30, rowHeight = 32;

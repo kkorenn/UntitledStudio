@@ -118,11 +118,12 @@ Every feature, every phase:
 **Done when:** make a beat, save, quit, reopen → identical. Undo works on every edit.
 
 ## Phase 5 — Sampler & browser
-- [ ] Sampler channel: load WAV/MP3/FLAC/AIFF, pitch by note, root note, start/end, loop
-- [ ] Drag-and-drop audio files onto the channel rack
-- [ ] File browser panel (left side, like FL) with folders + preview on click
-- [ ] Waveform display (`AudioThumbnail`)
-- [ ] Background disk streaming for long samples (no disk reads on audio thread)
+- [x] Sampler channel: load WAV/MP3/FLAC/AIFF, pitch by note, root note, start/end
+- [ ] Sample looping (Tracktion's sampler has no loop mode; needs custom sampler)
+- [x] Drag-and-drop audio files onto the channel rack
+- [x] File browser panel (left side, like FL) with folders + preview on click
+- [x] Waveform display (`AudioThumbnail`)
+- [x] Background disk streaming for long samples (no disk reads on audio thread)
 
 **Done when:** browse a sample folder, preview, drag into rack, play it from step sequencer.
 

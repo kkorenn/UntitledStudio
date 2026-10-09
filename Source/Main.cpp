@@ -10,6 +10,7 @@ using namespace std::literals;
 #include "PluginEditor.h"
 #include "ChannelSettings.h"
 #include "ChannelRack.h"
+#include "Browser.h"
 
 //==============================================================================
 // FL "typing keyboard to piano": Z-row = lower octave, Q-row = upper octave.
@@ -102,6 +103,7 @@ private:
 //==============================================================================
 class MainComponent : public juce::Component,
                       public juce::MenuBarModel,
+                      public juce::DragAndDropContainer,
                       private juce::Timer
 {
 public:
@@ -137,16 +139,23 @@ public:
         channelRackButton.onClick = [this] { channelRackPanel->toggle(); };
         addAndMakeVisible (channelRackButton);
 
+        browserButton.setTooltip ("Browser (Alt+F8)");
+        browserButton.onClick = [this] { toggleBrowser(); };
+        addAndMakeVisible (browserButton);
+
+        browser.onOpenProject = [this] (const juce::File& f) { maybeSave ([this, f] { openFile (f); }); };
+        addAndMakeVisible (browser);
         addAndMakeVisible (workspace);
 
         auto rack = std::make_unique<ChannelRack> (studio);
         rack->onOpenChannel = [this] (int id) { toggleChannelWindow (id); };
         channelRackPanel = std::make_unique<Panel> ("Channel rack", std::move (rack));
         workspace.addAndMakeVisible (*channelRackPanel);
-        channelRackPanel->setBounds (260, 60, 620, 260);
+        channelRackPanel->setBounds (40, 40, 620, 260);
 
         typing.onMidi = [this] (const juce::MidiMessage& m) { studio.playLiveNote (m); };
 
+        lastGeneration = studio.getEditGeneration();
         recent.setMaxNumberOfItems (10);
         recent.restoreFromString (settings.getValue ("recentFiles"));
 
@@ -221,7 +230,12 @@ public:
         metronome.setBounds (bar.removeFromLeft (22).withSizeKeepingCentre (20, 20));
         bar.removeFromLeft (20);
         channelRackButton.setBounds (bar.removeFromLeft (110));
+        bar.removeFromLeft (4);
+        browserButton.setBounds (bar.removeFromLeft (80));
 
+        browser.setVisible (browserVisible);
+        if (browserVisible)
+            browser.setBounds (r.removeFromLeft (230));
         workspace.setBounds (r);
     }
 
@@ -241,6 +255,7 @@ public:
         if (cmd && code == 'Z')                       { studio.undo().undo(); return true; }
         if (key == juce::KeyPress::spaceKey)          { studio.togglePlay(); return true; }
         if (key == juce::KeyPress::F6Key)             { channelRackPanel->toggle(); return true; }
+        if (key == juce::KeyPress::F8Key && mods.isAltDown()) { toggleBrowser(); return true; }
         if (key == juce::KeyPress::F10Key)            { showAudioSettings(); return true; }
         if (key.getKeyCode() == 'L' && mods.isAnyModifierKeyDown() == false)
         {
@@ -428,6 +443,12 @@ private:
         panel->toFront (false);
     }
 
+    void toggleBrowser()
+    {
+        browserVisible = ! browserVisible;
+        resized();
+    }
+
     void updatePatSong()
     {
         const bool song = studio.isSongMode();
@@ -551,7 +572,12 @@ private:
 
     static constexpr int menuHeight = 26, toolbarHeight = 44, recentMenuBase = 1000;
 
+    // Order matters: members below are constructed top to bottom.
+    Theme::LookAndFeel lookAndFeel;
+    Studio studio;
     juce::PropertiesFile settings { settingsOptions() };
+    Browser browser { studio.engine, settings };
+    bool browserVisible = true;
     juce::RecentlyOpenedFilesList recent;
     std::unique_ptr<juce::FileChooser> chooser;
     int lastGeneration = 0, ticks = 0;
@@ -559,11 +585,10 @@ private:
 
 public:
     void requestQuit() { quitRequested(); }
+    void debugOpenFirstChannel() { toggleChannelWindow (studio.getChannels().getChild (0)[IDs::id]); }
 
 private:
 
-    Theme::LookAndFeel lookAndFeel;
-    Studio studio;
     TypingKeyboard typing;
 
     juce::MenuBarComponent menuBar;
@@ -573,7 +598,7 @@ private:
     TransportButton recordButton { TransportButton::record, "Record (coming in Phase 12)" };
     Widgets::DragNumber tempo { 10.0, 522.0, 0.5 };
     Widgets::LedButton metronome { "Metronome", Theme::accent };
-    juce::TextButton channelRackButton { "Channel rack" };
+    juce::TextButton channelRackButton { "Channel rack" }, browserButton { "Browser" };
 
     juce::Component workspace;
     std::unique_ptr<Panel> channelRackPanel;
@@ -692,7 +717,11 @@ public:
         // Dev aid: --snapshot <file.png> renders the window to an image, then quits.
         if (commandLine.contains ("--snapshot"))
         {
-            const auto file = juce::File (commandLine.fromFirstOccurrenceOf ("--snapshot", false, false).trim().unquoted());
+            const auto file = juce::File (commandLine.fromFirstOccurrenceOf ("--snapshot", false, false).trim().upToFirstOccurrenceOf (" ", false, false).unquoted());
+            if (commandLine.contains ("--open-channel"))
+                if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
+                    mc->debugOpenFirstChannel();
+
             juce::Timer::callAfterDelay (2500, [this, file]
             {
                 if (auto* c = mainWindow->getContentComponent())
