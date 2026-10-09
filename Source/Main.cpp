@@ -21,6 +21,7 @@ using namespace std::literals;
 #include "UntitledTests.h"
 #include "FlpImport.h"
 #include "FlpTests.h"
+#include "Release.h"
 
 #if JUCE_MAC
  #include <mach/mach.h>
@@ -290,7 +291,11 @@ public:
 
         juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<MainComponent> (this)]
         {
-            if (safe != nullptr) safe->offerCrashRecovery();
+            if (safe != nullptr)
+            {
+                safe->offerCrashRecovery();
+                safe->maybeCheckForUpdates();
+            }
         });
     }
 
@@ -486,6 +491,12 @@ public:
             m.addItem ("Add a sound... (F8)", [this] { showSoundPicker(); });
             m.addSeparator();
             m.addItem ("Keyboard shortcuts...", [this] { showShortcuts(); });
+            m.addSeparator();
+            const bool updateFeed = juce::String (UNTITLEDSTUDIO_UPDATE_URL).isNotEmpty();
+            m.addItem (updateFeed ? "Check for updates at startup" : "Check for updates at startup (no update feed in this build)",
+                       updateFeed, updateFeed && settings.getBoolValue ("checkForUpdates", true),
+                       [this] { settings.setValue ("checkForUpdates", ! settings.getBoolValue ("checkForUpdates", true)); settings.saveIfNeeded(); });
+            m.addItem ("About Untitled Studio...", [this] { showAbout(); });
         }
         return m;
     }
@@ -887,6 +898,18 @@ private:
         o.launchAsync();
     }
 
+    void showAbout()
+    {
+        juce::DialogWindow::LaunchOptions o;
+        o.content.setOwned (new Release::AboutBox());
+        o.dialogTitle = "About Untitled Studio";
+        o.dialogBackgroundColour = Theme::panelDark;
+        o.escapeKeyTriggersCloseButton = true;
+        o.useNativeTitleBar = true;
+        o.resizable = false;
+        o.launchAsync();
+    }
+
     // FL F8 "plugin picker": synth sounds, our instruments, SFZ/SF2 files and installed plugins.
     void showSoundPicker()
     {
@@ -1125,7 +1148,7 @@ private:
 
         if (auto* window = getTopLevelComponent())
         {
-            const auto title = getProjectName() + (studio.isDirty() ? " *" : "") + " - untitledstudio";
+            const auto title = getProjectName() + (studio.isDirty() ? " *" : "") + " - Untitled Studio";
             if (window->getName() != title)
                 window->setName (title);
         }
@@ -1156,32 +1179,93 @@ private:
     //==========================================================================
     // Autosave + crash recovery. A lock file exists while the app runs; if it's still
     // there at startup, the last session crashed and the autosave can be recovered.
+    // Crash reports (Release::Crash) are offered in the same dialog.
 
-    static juce::File getAppDataFolder()
-    {
-        return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory).getChildFile ("untitledstudio");
-    }
-
-    static juce::File getAutosaveFile() { return getAppDataFolder().getChildFile ("Autosave").getChildFile ("autosave" + Studio::fileExtension); }
-    static juce::File getLockFile()     { return getAppDataFolder().getChildFile ("running.lock"); }
+    static juce::File getAutosaveFile() { return Release::appDataFolder().getChildFile ("Autosave").getChildFile ("autosave" + Studio::fileExtension); }
+    static juce::File getLockFile()     { return Release::appDataFolder().getChildFile ("running.lock"); }
 
     void offerCrashRecovery()
     {
-        const bool crashed = getLockFile().existsAsFile() && getAutosaveFile().existsAsFile();
-        getLockFile().create();
-
-        if (! crashed)
+        if (isDevRun())
             return;
 
-        juce::AlertWindow::showAsync (juce::MessageBoxOptions().withIconType (juce::MessageBoxIconType::QuestionIcon)
-                                          .withTitle ("Recover project?")
-                                          .withMessage ("untitledstudio didn't close properly last time.\nRecover your last autosave?")
-                                          .withButton ("Recover").withButton ("Discard"),
-                                      [this] (int result)
+        const bool hasAutosave = getLockFile().existsAsFile() && getAutosaveFile().existsAsFile();
+        getLockFile().create();
+        const auto report = Release::Crash::pending (Release::Crash::folder()).getLast();
+        if (hasAutosave || report.existsAsFile())
+            showCrashDialog (hasAutosave, report);
+    }
+
+    // View / Copy / Reveal keep the dialog up; Recover, Dismiss and Discard close it.
+    void showCrashDialog (bool hasAutosave, const juce::File& report)
+    {
+        const bool hasReport = report.existsAsFile();
+        const juce::String reveal = JUCE_MAC ? "Reveal in Finder" : "Show in folder";
+        juce::StringArray buttons;
+        if (hasAutosave) buttons.add ("Recover autosave");
+        if (hasReport)   buttons.addArray ({ "View report", "Copy report", reveal });
+        buttons.add (hasReport ? "Dismiss" : "Discard");
+
+        juce::String message = hasReport ? "Untitled Studio crashed last time. A crash report was saved on this computer (nothing was sent anywhere)."
+                                         : "Untitled Studio didn't close properly last time.";
+        if (hasAutosave)
+            message << "\nRecover your last autosave?";
+
+        // A hand-built AlertWindow: MessageBoxOptions only lays out up to 3 buttons.
+        auto* w = new juce::AlertWindow (hasReport ? "Untitled Studio crashed" : "Recover project?", message, juce::MessageBoxIconType::QuestionIcon);
+        for (int i = 0; i < buttons.size(); ++i)
+            w->addButton (buttons[i], (i + 1) % buttons.size()); // so Escape (0) picks the last one
+        w->enterModalState (true, juce::ModalCallbackFunction::create ([this, hasAutosave, report, buttons, reveal] (int result)
+        {
+            const auto chosen = buttons[(result + buttons.size() - 1) % buttons.size()];
+            if (chosen == "View report")    report.startAsProcess();
+            if (chosen == "Copy report")    juce::SystemClipboard::copyTextToClipboard (report.loadFileAsString());
+            if (chosen == reveal)           report.revealToUser();
+            if (chosen == "View report" || chosen == "Copy report" || chosen == reveal)
+                return showCrashDialog (hasAutosave, report);
+
+            Release::Crash::markSeen (Release::Crash::folder());
+            if (chosen == "Recover autosave" && studio.load (getAutosaveFile(), true))
+                reportMissingFiles();
+            if (hasAutosave)
+                getAutosaveFile().deleteFile();
+        }), true);
+    }
+
+    // At most once a day, on a background thread; only when this build has a feed URL.
+    void maybeCheckForUpdates()
+    {
+        const juce::String url = UNTITLEDSTUDIO_UPDATE_URL;
+        const auto now = juce::Time::currentTimeMillis();
+        if (url.isEmpty() || isDevRun() || ! settings.getBoolValue ("checkForUpdates", true)
+            || now - settings.getValue ("lastUpdateCheck").getLargeIntValue() < 24 * 60 * 60 * 1000)
+            return;
+
+        settings.setValue ("lastUpdateCheck", now);
+        settings.saveIfNeeded();
+        // ponytail: detached thread; if the app quits mid-request the result is just dropped (callAsync fails).
+        juce::Thread::launch ([url, safe = juce::Component::SafePointer<MainComponent> (this)]
+        {
+            if (auto info = Release::Update::fetch (url); info && Release::Update::isNewer (info->version, Release::version()))
+                juce::MessageManager::callAsync ([safe, i = *info]
+                {
+                    if (safe != nullptr)
+                        safe->showUpdateAvailable (i);
+                });
+        });
+    }
+
+    void showUpdateAvailable (const Release::Update::Info& info)
+    {
+        flashHint ("Untitled Studio " + info.version + " is available", 15000);
+        juce::AlertWindow::showAsync (juce::MessageBoxOptions().withIconType (juce::MessageBoxIconType::InfoIcon)
+                                          .withTitle ("Version " + info.version + " is available")
+                                          .withMessage ("You have " + Release::version() + "." + (info.notes.isNotEmpty() ? "\n\n" + info.notes : juce::String()))
+                                          .withButton ("Download").withButton ("Later"),
+                                      [url = info.url] (int result)
                                       {
-                                          if (result == 1 && studio.load (getAutosaveFile(), true))
-                                              reportMissingFiles();
-                                          getAutosaveFile().deleteFile();
+                                          if (result == 1)
+                                              juce::URL (url).launchInDefaultBrowser();
                                       });
     }
 
@@ -1195,9 +1279,9 @@ private:
     static juce::PropertiesFile::Options settingsOptions()
     {
         juce::PropertiesFile::Options o;
-        o.applicationName = "untitledstudio";
+        o.applicationName = "Untitled Studio";
         o.filenameSuffix = ".settings";
-        o.folderName = "untitledstudio";
+        o.folderName = "Untitled Studio";
         o.osxLibrarySubFolder = "Application Support";
         return o;
     }
@@ -1360,7 +1444,7 @@ public:
 };
 
 //==============================================================================
-// Headless checks: `untitledstudio --selftest`. Exit code 0 = pass.
+// Headless checks: `Untitled Studio --selftest`. Exit code 0 = pass.
 namespace SelfTest
 {
     inline bool check (bool condition, const juce::String& what)
@@ -2271,7 +2355,7 @@ namespace SelfTest
             ok &= check (clamped && f.getCurrentPatternState().isValid() && f.getSwing() <= 1.0 && slowest < 5000.0,
                          "fuzz: huge / NaN / negative numbers are clamped (slowest load " + juce::String ((int) slowest) + " ms)");
 
-            const juce::String ghost = "/nonexistent/untitledstudio/Ghost Kick.wav";
+            const juce::String ghost = "/nonexistent/Untitled Studio/Ghost Kick.wav";
             auto withGhosts = juce::parseXML (valid);
             withGhosts->getChildByName ("STUDIO")->getChildByName ("CHANNELS")->getChildElement (0)->setAttribute ("file", ghost);
             auto* plugin = withGhosts->getChildByName ("TRACK")->createNewChildElement ("PLUGIN");
@@ -2329,12 +2413,40 @@ namespace SelfTest
         file.deleteFile();
         instrDir.deleteRecursively();
 
+        // Release: version, crash reports, update feed (no network).
+        {
+            ok &= check (Release::version() == "0.1.0" && Release::icon().getWidth() == 1024, "release: version 0.1.0 from CMake, app icon embedded");
+
+            const auto dir = juce::File::createTempFile ("crashreports");
+            juce::Logger::writeToLog ("selftest log line");
+            const auto report = Release::Crash::makeReport ("selftest");
+            Release::Crash::write (dir, report);
+            const int pendingBefore = Release::Crash::pending (dir).size();
+            Release::Crash::markSeen (dir);
+            ok &= check (pendingBefore == 1 && Release::Crash::pending (dir).isEmpty() && dir.getChildFile ("Seen").getNumberOfChildFiles (juce::File::findFiles) == 1
+                             && report.contains ("Version:  0.1.0") && report.contains ("Backtrace:") && report.contains ("selftest log line"),
+                         "crash report: written with version, backtrace and recent log; detected as pending, then moved to Seen");
+            dir.deleteRecursively();
+
+            using namespace Release::Update;
+            ok &= check (isNewer ("0.2.0", "0.1.0") && isNewer ("0.10.0", "0.9.9") && isNewer ("1.0", "0.9.9") && isNewer ("v1.0.1", "1.0.0")
+                             && ! isNewer ("0.1.0", "0.1.0") && ! isNewer ("0.1", "0.1.0") && ! isNewer ("0.0.9", "0.1.0")
+                             && isNewer ("1.0.0", "1.0.0-beta") && ! isNewer ("1.0.0-beta", "1.0.0") && isNewer ("1.0.0-beta.2", "1.0.0-beta.1")
+                             && compare ("1.2.3+build5", "1.2.3") == 0,
+                         "update check: semantic version compare (numeric parts, pre-release < release, build metadata ignored)");
+            const auto good = parse (R"({ "version": "0.2.0", "url": "https://example.com/dl", "notes": "Faster mixer" })");
+            ok &= check (good && good->version == "0.2.0" && good->url == "https://example.com/dl" && good->notes == "Faster mixer"
+                             && ! parse ("not json") && ! parse (R"({ "version": "0.2.0", "url": "file:///etc/passwd" })")
+                             && ! parse (R"({ "version": "", "url": "https://example.com" })") && ! parse (R"({ "url": "https://example.com" })"),
+                         "update check: feed JSON parsed; bad JSON, missing version and non-web URLs rejected");
+        }
+
         std::cout << (ok ? "PASS" : "FAILED") << std::endl;
         return ok;
     }
 
     //==========================================================================
-    // `untitledstudio --stress`: 100 channels, 50 effects, 16 bars. Prints a load report.
+    // `Untitled Studio --stress`: 100 channels, 50 effects, 16 bars. Prints a load report.
     inline void stress (te::Engine& engine)
     {
         using Clock = std::chrono::steady_clock;
@@ -2464,6 +2576,23 @@ namespace SelfTest
     }
 }
 
+// The app used to be called "untitledstudio": move its old folders (music, settings) to the new name once.
+inline void migrateOldFolders()
+{
+    using F = juce::File;
+    const std::pair<F, const char*> places[] = {
+        { F::getSpecialLocation (F::userMusicDirectory), "untitledstudio" },
+        { F::getSpecialLocation (F::userApplicationDataDirectory), "untitledstudio" },
+        { F::getSpecialLocation (F::userApplicationDataDirectory).getChildFile ("Application Support"), "untitledstudio" },
+    };
+    for (auto& [base, oldName] : places)
+    {
+        const auto oldDir = base.getChildFile (oldName), newDir = base.getChildFile ("Untitled Studio");
+        if (oldDir.isDirectory() && ! newDir.exists())
+            oldDir.moveFileTo (newDir);
+    }
+}
+
 class UntitledStudioApp : public juce::JUCEApplication
 {
 public:
@@ -2476,7 +2605,44 @@ public:
         if (te::PluginManager::startChildProcessPluginScan (commandLine))
             return;
 
-        engine = std::make_unique<te::Engine> ("untitledstudio", std::make_unique<StudioUIBehaviour>(),
+        migrateOldFolders();
+        juce::Logger::setCurrentLogger (&Release::log());
+        juce::SystemStats::setApplicationCrashHandler (Release::Crash::handler);
+
+        // Dev aid: crash on purpose to test the crash report (written to ~/Library/Untitled Studio/CrashReports).
+        if (commandLine.contains ("--crash-test"))
+        {
+            juce::Logger::writeToLog ("crash test requested");
+            volatile int* nowhere = nullptr;
+            *nowhere = 1;
+        }
+
+        // Dev aid: fetch an update feed now and print what it says.
+        if (commandLine.contains ("--update-check "))
+        {
+            const auto url = commandLine.fromFirstOccurrenceOf ("--update-check ", false, false).upToFirstOccurrenceOf (" ", false, false);
+            if (auto info = Release::Update::fetch (url))
+                std::cout << "feed: " << info->version << " " << info->url << " newer than " << Release::version() << ": "
+                          << (Release::Update::isNewer (info->version, Release::version()) ? "yes" : "no") << std::endl;
+            else
+                std::cout << "feed: unreachable or invalid" << std::endl;
+            quit();
+            return;
+        }
+
+        // Normal launch: show the splash first, start the engine once it has painted.
+        if (! commandLine.contains ("--"))
+        {
+            splash = new Release::Splash();
+            juce::Timer::callAfterDelay (100, [this, commandLine] { start (commandLine); });
+            return;
+        }
+        start (commandLine);
+    }
+
+    void start (const juce::String& commandLine)
+    {
+        engine = std::make_unique<te::Engine> ("Untitled Studio", std::make_unique<StudioUIBehaviour>(),
                                                std::make_unique<StudioEngineBehaviour>());
         Effects::registerAll (*engine);
 
@@ -2524,6 +2690,8 @@ public:
         }
 
         mainWindow = std::make_unique<MainWindow> (getApplicationName(), *engine);
+        if (splash != nullptr)
+            splash->deleteAfterDelay ({}, false);
 
         // Dev aid: --snapshot <file.png> renders the window to an image, then quits.
         if (commandLine.contains ("--snapshot"))
@@ -2581,12 +2749,13 @@ public:
             // --snapshot-scale 2 renders like a Retina display.
             const float scale = commandLine.contains ("--snapshot-scale ")
                                     ? juce::jlimit (0.5f, 4.0f, commandLine.fromFirstOccurrenceOf ("--snapshot-scale ", false, false).getFloatValue()) : 1.0f;
-            const bool picker = commandLine.contains ("--open-picker");
-            juce::Timer::callAfterDelay (2500, [this, file, scale, picker]
+            const bool picker = commandLine.contains ("--open-picker"), aboutOnly = commandLine.contains ("--open-about");
+            juce::Timer::callAfterDelay (2500, [this, file, scale, picker, aboutOnly]
             {
                 if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()); mc != nullptr && picker)
                     mc->debugOpenPicker(); // opened last: a callout closes itself when the app isn't in front
-                if (auto* c = mainWindow->getContentComponent())
+                Release::AboutBox about;
+                if (auto* c = aboutOnly ? &about : mainWindow->getContentComponent())
                 {
                     juce::PNGImageFormat png;
                     file.deleteFile();
@@ -2602,6 +2771,7 @@ public:
     {
         mainWindow = nullptr;
         engine = nullptr;
+        juce::Logger::setCurrentLogger (nullptr);
     }
 
     void systemRequestedQuit() override
@@ -2613,6 +2783,7 @@ public:
 private:
     std::unique_ptr<te::Engine> engine;
     std::unique_ptr<MainWindow> mainWindow;
+    juce::Component::SafePointer<juce::SplashScreen> splash;
 };
 
 START_JUCE_APPLICATION (UntitledStudioApp)

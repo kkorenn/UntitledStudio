@@ -4,3 +4,5 @@ build-release/
 .vscode/
 .idea/
 testdata/
+dist/
+.cache/

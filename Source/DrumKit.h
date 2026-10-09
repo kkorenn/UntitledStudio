@@ -7,7 +7,7 @@ namespace DrumKit
     inline juce::File getPacksFolder()
     {
         return juce::File::getSpecialLocation (juce::File::userMusicDirectory)
-                   .getChildFile ("untitledstudio").getChildFile ("Packs");
+                   .getChildFile ("Untitled Studio").getChildFile ("Packs");
     }
 
     inline juce::File getDrumsFolder() { return getPacksFolder().getChildFile ("Drums"); }

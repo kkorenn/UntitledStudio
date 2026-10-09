@@ -4,7 +4,7 @@
 #include "Widgets.h"
 
 // Audio editing on whole buffers. The user's files are never overwritten: "Apply" writes a new
-// file into ~/Music/untitledstudio/Edits and the clip / sampler is pointed at it (undoable).
+// file into ~/Music/Untitled Studio/Edits and the clip / sampler is pointed at it (undoable).
 namespace AudioEdit
 {
     using Buffer = juce::AudioBuffer<float>;
@@ -71,7 +71,7 @@ namespace AudioEdit
 
     inline juce::File getEditsFolder()
     {
-        return juce::File::getSpecialLocation (juce::File::userMusicDirectory).getChildFile ("untitledstudio").getChildFile ("Edits");
+        return juce::File::getSpecialLocation (juce::File::userMusicDirectory).getChildFile ("Untitled Studio").getChildFile ("Edits");
     }
 
     // "Kick.wav" -> Edits/"Kick (edit 1).wav"; "Kick (edit 1).wav" -> "Kick (edit 2).wav".
@@ -361,7 +361,7 @@ private:
             return onPreview ({});
         }
         const auto range = selection.isEmpty() ? AudioEdit::Range (selection.getStart(), buffer.getNumSamples()) : selection;
-        const auto temp = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("untitledstudio audio editor preview.wav");
+        const auto temp = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("Untitled Studio audio editor preview.wav");
         if (AudioEdit::writeWav (AudioEdit::copy (buffer, range), sampleRate, temp))
         {
             playing = true;

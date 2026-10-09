@@ -152,7 +152,7 @@ public:
     static juce::File getProjectsFolder()
     {
         return juce::File::getSpecialLocation (juce::File::userMusicDirectory)
-                   .getChildFile ("untitledstudio").getChildFile ("Projects");
+                   .getChildFile ("Untitled Studio").getChildFile ("Projects");
     }
 
     te::Engine& engine;
@@ -175,7 +175,7 @@ public:
     static juce::File getTemplatesFolder()
     {
         return juce::File::getSpecialLocation (juce::File::userMusicDirectory)
-                   .getChildFile ("untitledstudio").getChildFile ("Templates");
+                   .getChildFile ("Untitled Studio").getChildFile ("Templates");
     }
 
     // Built-in templates are written in code; the result is a clean, untitled project.
@@ -601,7 +601,7 @@ public:
     static juce::File getRecordingsFolder()
     {
         return juce::File::getSpecialLocation (juce::File::userMusicDirectory)
-                   .getChildFile ("untitledstudio").getChildFile ("Recordings");
+                   .getChildFile ("Untitled Studio").getChildFile ("Recordings");
     }
 
     bool isRecording() const { return recording; }

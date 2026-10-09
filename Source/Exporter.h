@@ -258,7 +258,7 @@ namespace Exporter
         {
             const int what = whatBox.getSelectedItemIndex();
             const auto settings = getSettings();
-            const auto folder = juce::File::getSpecialLocation (juce::File::userMusicDirectory).getChildFile ("untitledstudio").getChildFile ("Exports");
+            const auto folder = juce::File::getSpecialLocation (juce::File::userMusicDirectory).getChildFile ("Untitled Studio").getChildFile ("Exports");
             folder.createDirectory();
 
             if (what == 1)

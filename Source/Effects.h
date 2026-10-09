@@ -144,7 +144,7 @@ namespace Effects
 
 //==============================================================================
 // Effect factory presets (synth presets are in SynthPresets.h).
-// User presets are XML files in ~/Music/untitledstudio/Presets/<plugin type>/.
+// User presets are XML files in ~/Music/Untitled Studio/Presets/<plugin type>/.
 namespace Presets
 {
     inline const std::vector<Preset>& factory (const juce::String& type)
@@ -204,7 +204,7 @@ namespace Presets
 
     inline juce::File getUserFolder()
     {
-        return juce::File::getSpecialLocation (juce::File::userMusicDirectory).getChildFile ("untitledstudio").getChildFile ("Presets");
+        return juce::File::getSpecialLocation (juce::File::userMusicDirectory).getChildFile ("Untitled Studio").getChildFile ("Presets");
     }
 
     inline juce::File folderFor (te::Plugin& p) { return getUserFolder().getChildFile (p.getPluginType()); }

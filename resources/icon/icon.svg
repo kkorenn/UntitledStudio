@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- untitledstudio app icon (original artwork). Render with ./render.sh -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#465058"/>
+      <stop offset="1" stop-color="#1d2226"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffb466"/>
+      <stop offset="1" stop-color="#f07a1e"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+  <rect x="100.5" y="100.5" width="823" height="823" rx="185" fill="none" stroke="#000" stroke-opacity="0.35" stroke-width="3"/>
+  <!-- step-sequencer row along the bottom -->
+  <g fill="#e8ecef" fill-opacity="0.13">
+    <rect x="212" y="742" width="120" height="70" rx="16"/>
+    <rect x="356" y="742" width="120" height="70" rx="16"/>
+    <rect x="548" y="742" width="120" height="70" rx="16"/>
+    <rect x="692" y="742" width="120" height="70" rx="16"/>
+  </g>
+  <rect x="212" y="742" width="120" height="70" rx="16" fill="#e8ecef"/>
+  <rect x="548" y="742" width="120" height="70" rx="16" fill="#e8ecef"/>
+  <!-- the mark: a lowercase "u" drawn as one thick stroke -->
+  <path d="M 322 236 V 470 A 190 190 0 0 0 702 470 V 236" fill="none" stroke="url(#mark)" stroke-width="112" stroke-linecap="round"/>
+  <!-- green LED -->
+  <circle cx="702" cy="236" r="30" fill="#7cd85a"/>
+</svg>

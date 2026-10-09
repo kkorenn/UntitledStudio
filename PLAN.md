@@ -1,4 +1,4 @@
-# untitledstudio — Road to FL Studio Quality
+# Untitled Studio — Road to FL Studio Quality
 
 Stack: **C++ · JUCE · Tracktion Engine · CMake · Git**
 Platform first: **macOS** (add Windows later, Phase 15).
@@ -305,12 +305,12 @@ Every effect has a themed window, bypass, factory presets (main ones) and user p
 - [ ] Browser: tags, search, favorites, auto BPM/key detection, preview in tempo
 
 ### 14f — Pro features
-- [x] Audio editor (≈ Edison): our "Audio editor" window — waveform, drag-select, Ctrl+wheel zoom, play selection, cut/copy/paste/delete/trim, silence, fade in/out, normalize (-0.3 dB), reverse, ±3 dB, undo/redo (20 buffer snapshots). Opened from playlist audio clip title-bar right-click, sampler/instrument "Edit sample...", browser right-click. Apply writes ~/Music/untitledstudio/Edits/"<name> (edit N).wav" and repoints the channel (one undo step); originals never touched. Not done: noise removal
+- [x] Audio editor (≈ Edison): our "Audio editor" window — waveform, drag-select, Ctrl+wheel zoom, play selection, cut/copy/paste/delete/trim, silence, fade in/out, normalize (-0.3 dB), reverse, ±3 dB, undo/redo (20 buffer snapshots). Opened from playlist audio clip title-bar right-click, sampler/instrument "Edit sample...", browser right-click. Apply writes ~/Music/Untitled Studio/Edits/"<name> (edit N).wav" and repoints the channel (one undo step); originals never touched. Not done: noise removal
 - [x] Time-stretch + pitch-shift audio clips — per clip "Stretch to tempo", "Pitch..." (±24 st), "Set original BPM..." (clip title-bar right-click). Tracktion auto-tempo + SoundTouch, stretched in real time (no proxy files). Files named "... 120 BPM" stretch automatically when dropped (FL loop behaviour)
 - [x] Preset browser + search — browser "Presets" root (factory + user presets per synth/effect), search box filters sounds (recursive), presets, plugins; double-click loads on the selected channel's instrument or selected insert's matching effect, else a hint. Not done: tags
 - [x] Tempo + time-signature changes over the song — tempo markers in the playlist ruler (right-click: add / edit / remove), stored in the model (STUDIO/TEMPOS) and synced to the tempo sequence as jumps; clips keep their beat positions. Time signature is project-wide (no mid-song signature changes); toolbar tempo shows the start tempo
 - [ ] Performance / live mode (clip launching)
-- [x] Project templates (trap, house, lo-fi…) — FILE > New from template: Empty, Basic beat (default), Trap 140, House 124, Lo-fi 85 + swing; "Save as template..." → ~/Music/untitledstudio/Templates
+- [x] Project templates (trap, house, lo-fi…) — FILE > New from template: Empty, Basic beat (default), Trap 140, House 124, Lo-fi 85 + swing; "Save as template..." → ~/Music/Untitled Studio/Templates
 - [ ] Arpeggiator + chord generator (MIDI effects)
   - [x] Arpeggiator: per channel (ARP row in channel windows, channel rack right-click > Arpeggiator): off/up/down/up-down/random, 1/32…1/4, 1–4 octaves, gate. Applied when notes are generated, so it renders/exports. Live typing-keyboard arp not done
   - [ ] Chord generator
@@ -353,14 +353,14 @@ Every effect has a themed window, bypass, factory presets (main ones) and user p
 - [x] Untitled stock effects suite (substitutes for FL stock effects on import) — FlStockMap::untitledTypeFor() maps FL plugin names to our types; parameter mapping for the documented ones (see above)
 
 ## Phase 16 — Release
-- [ ] App icon, splash, about screen
-- [ ] macOS code signing + notarization (Apple Developer account, $99/yr)
-- [ ] Windows installer + code signing
-- [ ] Crash reporting
-- [ ] Auto-update
+- [x] App icon, splash, about screen — own icon (`resources/icon/icon.svg` → `icon_1024.png` → `.icns`, an orange "u" + step row, nothing from FL); splash while the engine starts (normal launches only); OPTIONS > About shows version, build date, GPLv3 notice, source link and the third-party licenses
+- [ ] macOS code signing + notarization (Apple Developer account, $99/yr) — `scripts/package-macos.sh` makes an ad-hoc signed DMG today (13 MB, mounts and launches); the Developer ID + notarytool path is written (`resources/entitlements.plist`) but untested until there's an account
+- [ ] Windows installer + code signing — plan in RELEASING.md (Inno Setup / WiX, OV/EV certificate)
+- [x] Crash reporting — local only: crash handler writes `~/Library/untitledstudio/CrashReports/*.txt` (version, OS, backtrace, last 200 log lines); next launch offers View / Copy / Reveal / Dismiss in the same dialog as autosave recovery. No upload yet (hook marked in `Release.h`)
+- [x] Auto-update — update *check* only: JSON feed (`update.json`), once a day in the background, "Version X is available" + Download button; off until a build sets `UNTITLEDSTUDIO_UPDATE_URL` and the feed is hosted (raw GitHub URL works once pushed). No self-installing updates
 - [ ] Website, manual, tutorial videos
 - [ ] Beta testers → fix → v1.0
-- [ ] Check licenses: JUCE (paid above revenue cap, or GPL), Tracktion Engine (same), VST3 SDK (now MIT), any DSP libs
+- [x] Check licenses: JUCE (paid above revenue cap, or GPL), Tracktion Engine (same), VST3 SDK (now MIT), any DSP libs — app is GPLv3 (`LICENSE`); JUCE 9 is actually AGPLv3 (compatible via GPLv3 §13); every bundled library in `THIRD_PARTY_LICENSES.md` (SoundTouch is LGPL, fine for a GPL app), license texts copied into the app bundle. Version 0.1.0
 
 ---
 
