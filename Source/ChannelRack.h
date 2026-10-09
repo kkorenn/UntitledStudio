@@ -52,6 +52,7 @@ public:
 
         Widgets::noFocus (*this);
         rebuildRows();
+        studio.editAboutToChange.push_back ([this] { rows.clear(); });
         startTimerHz (30);
     }
 
@@ -87,7 +88,7 @@ private:
     class ChannelRow : public juce::Component
     {
     public:
-        static constexpr int stepsLeft = 196, stepWidth = 20, nameRight = 190;
+        static constexpr int stepsLeft = 230, stepWidth = 20, nameRight = 224;
 
         ChannelRow (ChannelRack& r, int id) : rack (r), studio (r.studio), channelId (id)
         {
@@ -112,6 +113,15 @@ private:
             addAndMakeVisible (pan);
             addAndMakeVisible (volume);
 
+            insert.format = [] (double v) { return v < 0.5 ? juce::String ("--") : juce::String ((int) v); };
+            insert.setTooltip ("Mixer insert this channel plays through (drag up/down, -- = master)");
+            insert.onChange = [this] (double v)
+            {
+                studio.undo().beginNewTransaction ("Route channel");
+                studio.setChannelInsert (channelId, (int) std::round (v));
+            };
+            addAndMakeVisible (insert);
+
             name.setTooltip ("Left-click: open channel. Right-click: options");
             name.onClick = [this] { studio.selectChannel (channelId); if (rack.onOpenChannel) rack.onOpenChannel (channelId); };
             name.onRightClick = [this] { showMenu(); };
@@ -130,6 +140,7 @@ private:
             auto channel = studio.getChannel (channelId);
             name.setButtonText (channel[IDs::name].toString());
             select.setToggleState (studio.getSelectedChannel() == channelId, juce::dontSendNotification);
+            insert.setValue (studio.getChannelInsert (channelId));
             if (auto t = track())
                 mute.setToggleState (! t->isMuted (false), juce::dontSendNotification);
 
@@ -178,7 +189,9 @@ private:
             r.removeFromLeft (4);
             pan.setBounds (r.removeFromLeft (24));
             volume.setBounds (r.removeFromLeft (24));
-            r.removeFromLeft (6);
+            r.removeFromLeft (4);
+            insert.setBounds (r.removeFromLeft (28).reduced (0, 2));
+            r.removeFromLeft (4);
             name.setBounds (r.withRight (nameRight));
             select.setBounds (getWidth() - 14, 7, 10, getHeight() - 14);
         }
@@ -288,6 +301,7 @@ private:
         const int channelId;
         Widgets::LedButton mute { "Mute (left-click) / Solo (right-click)" };
         juce::Slider pan, volume;
+        Widgets::DragNumber insert { 0.0, (double) Studio::numInserts, 0.1 };
         struct NameButton : juce::TextButton
         {
             std::function<void()> onRightClick;

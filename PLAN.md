@@ -157,12 +157,13 @@ Every feature, every phase:
 **Done when:** arrange a full 3-minute song (intro, verse, drop, outro) from patterns.
 
 ## Phase 8 — Mixer
-- [ ] Mixer window: master + 100+ insert tracks
-- [ ] Route channels → mixer tracks
-- [ ] Per track: volume fader, pan, mute, solo, peak meter
-- [ ] 10 effect slots per track
-- [ ] Sends / routing between tracks, sidechain
-- [ ] Latency compensation (PDC)
+- [x] Mixer window: master + 20 insert tracks
+- [ ] Grow to 100+ inserts (create on demand)
+- [x] Route channels → mixer tracks
+- [x] Per track: volume fader, pan, mute, solo, peak meter
+- [x] 10 effect slots per track
+- [x] Sends / routing between tracks, sidechain
+- [x] Latency compensation (PDC) — handled by Tracktion
 - [ ] Stereo separation, phase invert
 
 **Done when:** route drums to bus with sidechain compression from kick, no phase/latency issues.
@@ -313,6 +314,10 @@ Each effect gets a custom GUI + factory presets.
 - [ ] Stress test: 100 tracks, 50 plugins, no dropouts at 256 buffer
 - [ ] Fuzz save/load, test corrupted project files
 - [ ] Windows build (ASIO support)
+- [ ] Own virtual ASIO driver for Windows (like FL Studio ASIO / ASIO4ALL): low-latency ASIO on any sound card, wraps WASAPI, lets other apps share the device
+  - [ ] Build as a separate COM DLL + installer registration; test with other DAWs too
+  - [ ] Check ASIO SDK license terms (Steinberg) before shipping
+  - [ ] macOS doesn't need it (CoreAudio is already low-latency)
 
 ## Phase 16 — Release
 - [ ] App icon, splash, about screen

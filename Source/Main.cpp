@@ -13,6 +13,7 @@ using namespace std::literals;
 #include "Browser.h"
 #include "PianoRoll.h"
 #include "Playlist.h"
+#include "Mixer.h"
 
 //==============================================================================
 // FL "typing keyboard to piano": Z-row = lower octave, Q-row = upper octave.
@@ -146,6 +147,10 @@ public:
         playlistButton.onClick = [this] { playlistPanel->toggle(); };
         addAndMakeVisible (playlistButton);
 
+        mixerButton.setTooltip ("Mixer (F9)");
+        mixerButton.onClick = [this] { mixerPanel->toggle(); };
+        addAndMakeVisible (mixerButton);
+
         pianoRollButton.setTooltip ("Piano roll (F7)");
         pianoRollButton.onClick = [this] { pianoRollPanel->toggle(); };
         addAndMakeVisible (pianoRollButton);
@@ -175,6 +180,15 @@ public:
         channelRackPanel = std::make_unique<Panel> ("Channel rack", std::move (rack));
         workspace.addAndMakeVisible (*channelRackPanel);
         channelRackPanel->setBounds (40, 40, 620, 260);
+
+        auto mix = std::make_unique<Mixer> (studio);
+        mix->onOpenEffect = [this] (te::Plugin& p) { openEffectWindow (p); };
+        mixerPanel = std::make_unique<Panel> ("Mixer", std::move (mix));
+        workspace.addChildComponent (*mixerPanel);
+        mixerPanel->setBounds (60, 260, 1040, 420);
+
+        // Windows holding plugin pointers close before a project is replaced.
+        studio.editAboutToChange.push_back ([this] { channelPanels.clear(); effectPanels.clear(); });
 
         auto roll = std::make_unique<PianoRoll> (studio);
         pianoRoll = roll.get();
@@ -271,6 +285,8 @@ public:
         bar.removeFromLeft (4);
         pianoRollButton.setBounds (bar.removeFromLeft (90));
         bar.removeFromLeft (4);
+        mixerButton.setBounds (bar.removeFromLeft (70));
+        bar.removeFromLeft (4);
         browserButton.setBounds (bar.removeFromLeft (80));
 
         browser.setVisible (browserVisible);
@@ -298,6 +314,7 @@ public:
         if (isFrontPanel (*playlistPanel) && playlist->handleKey (key))
             return true;
         if (key == juce::KeyPress::F5Key)             { playlistPanel->toggle(); return true; }
+        if (key == juce::KeyPress::F9Key)             { mixerPanel->toggle(); return true; }
         if (key == juce::KeyPress::spaceKey)          { studio.togglePlay(); return true; }
         if (key == juce::KeyPress::F7Key)             { pianoRollPanel->toggle(); return true; }
         if (key == juce::KeyPress::F6Key)             { channelRackPanel->toggle(); return true; }
@@ -469,6 +486,20 @@ private:
         o.launchAsync();
     }
 
+    void openEffectWindow (te::Plugin& plugin)
+    {
+        for (auto* p : effectPanels)
+            if (auto* w = dynamic_cast<EffectWindow*> (&p->getContent()); w != nullptr && w->getPlugin() == &plugin)
+                return p->show();
+
+        auto content = std::make_unique<EffectWindow> (studio, plugin);
+        const auto size = content->getBounds();
+        auto* panel = effectPanels.add (new Panel (Effects::displayName (plugin), std::move (content)));
+        workspace.addAndMakeVisible (panel);
+        panel->setBounds (380 + 24 * (effectPanels.size() % 6), 100 + 24 * (effectPanels.size() % 6),
+                          size.getWidth() + 2, size.getHeight() + Panel::titleHeight + 1);
+    }
+
     void toggleChannelWindow (int channelId)
     {
         for (auto* p : channelPanels)
@@ -614,6 +645,12 @@ private:
         metronome.setToggleState (studio.isMetronomeOn(), juce::dontSendNotification);
         updatePatSong();
 
+        // Close windows of removed effects (e.g. after undo).
+        for (int i = effectPanels.size(); --i >= 0;)
+            if (auto* w = dynamic_cast<EffectWindow*> (&effectPanels[i]->getContent()))
+                if (w->getPlugin()->getOwnerList() == nullptr)
+                    effectPanels.remove (i);
+
         // Close windows of deleted channels.
         for (int i = channelPanels.size(); --i >= 0;)
             if (auto* cs = dynamic_cast<ChannelSettings*> (&channelPanels[i]->getContent()))
@@ -695,6 +732,18 @@ public:
         pianoRollPanel->show();
     }
 
+    void debugOpenMixer()
+    {
+        studio.setChannelInsert (studio.getChannels().getChild (0)[IDs::id], 1);
+        if (auto p = studio.addEffect (1, te::CompressorPlugin::xmlTypeName)) openEffectWindow (*p);
+        studio.addEffect (1, te::ReverbPlugin::xmlTypeName);
+        studio.addSend (1, 2);
+        channelRackPanel->setVisible (false);
+        mixerPanel->show();
+        if (auto* m = dynamic_cast<Mixer*> (&mixerPanel->getContent()))
+            juce::ignoreUnused (m);
+    }
+
     void debugDemoSong()
     {
         const int p1 = studio.getCurrentPattern();
@@ -724,10 +773,11 @@ private:
     Widgets::DragNumber tempo { 10.0, 522.0, 0.5 };
     Widgets::LedButton metronome { "Metronome", Theme::accent };
     juce::TextButton channelRackButton { "Channel rack" }, browserButton { "Browser" }, pianoRollButton { "Piano roll" },
-                     playlistButton { "Playlist" }, patternButton { "Pattern 1" };
+                     playlistButton { "Playlist" }, patternButton { "Pattern 1" }, mixerButton { "Mixer" };
 
     juce::Component workspace;
-    std::unique_ptr<Panel> playlistPanel, channelRackPanel, pianoRollPanel;
+    std::unique_ptr<Panel> playlistPanel, channelRackPanel, pianoRollPanel, mixerPanel;
+    juce::OwnedArray<Panel> effectPanels;
     Playlist* playlist = nullptr;
     PianoRoll* pianoRoll = nullptr;
     juce::OwnedArray<Panel> channelPanels;
@@ -826,6 +876,21 @@ namespace SelfTest
             ok &= check (countNotes (s, kick) == 5, "pattern mode plays only the current pattern");
         }
 
+        {
+            // Mixer routing: channel -> insert 3, effect + send survive.
+            s.undo().beginNewTransaction();
+            s.setChannelInsert (kick, 3);
+            ok &= check (s.getTrack (kick)->getOutput().getDestinationTrack() == s.getInsertTrack (3), "channel routes to its insert");
+            ok &= check (s.addEffect (3, te::ReverbPlugin::xmlTypeName) != nullptr, "add effect to insert");
+            ok &= check (s.getInsertEffects (3).size() == 1, "insert shows one effect");
+            s.addSend (3, 5);
+            ok &= check (s.getInsertSends (3).size() == 1, "send created");
+            s.undo().beginNewTransaction();
+            s.setChannelInsert (kick, 0);
+            ok &= check (s.getTrack (kick)->getOutput().getDestinationTrack() == nullptr, "insert 0 = master");
+            s.setChannelInsert (kick, 3);
+        }
+
         const auto file = juce::File::createTempFile (Studio::fileExtension);
         ok &= check (s.isDirty(), "edits mark project dirty");
         ok &= check (s.saveTo (file), "save project");
@@ -835,6 +900,7 @@ namespace SelfTest
             ok &= check (loaded.load (file), "load project");
             ok &= check (loaded.getChannels().getNumChildren() == 5, "channels survive save/load");
             ok &= check (countNotes (loaded, kick) == 5, "notes survive save/load");
+            ok &= check (loaded.getInsertEffects (3).size() == 1 && loaded.getChannelInsert (kick) == 3, "mixer survives save/load");
             loaded.setStep (kick, 2, true);
             ok &= check (countNotes (loaded, kick) == 6, "loaded project still drives the engine");
         }
@@ -869,6 +935,10 @@ public:
         if (commandLine.contains ("--snapshot"))
         {
             const auto file = juce::File (commandLine.fromFirstOccurrenceOf ("--snapshot", false, false).trim().upToFirstOccurrenceOf (" ", false, false).unquoted());
+            if (commandLine.contains ("--open-mixer"))
+                if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
+                    mc->debugOpenMixer();
+
             if (commandLine.contains ("--demo-song"))
                 if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
                     mc->debugDemoSong();

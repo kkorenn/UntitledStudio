@@ -10,6 +10,7 @@ namespace te = tracktion;
 //   STUDIO (currentPattern, songMode, swing)
 //     CHANNELS / CHANNEL (id, name, type, track, file, colour)
 //     PATTERNS / PATTERN (id, name, colour) / NOTE (channel, start, length, key, velocity)
+//     INSERTS / INSERT  (index, name, track)  -- mixer inserts; index 0 = master
 //     PLAYLIST / PCLIP   (id, type, pattern | channel, lane, start, length, offset, muted)  -- beats
 //
 // Each channel = one Tracktion AudioTrack holding its instrument + one "derived" MidiClip.
@@ -24,7 +25,7 @@ namespace IDs
     STUDIO_ID (channel) STUDIO_ID (start) STUDIO_ID (length) STUDIO_ID (key) STUDIO_ID (velocity)
     STUDIO_ID (pattern) STUDIO_ID (lane) STUDIO_ID (currentPattern) STUDIO_ID (songMode) STUDIO_ID (swing)
     STUDIO_ID (derived) STUDIO_ID (nextId) STUDIO_ID (offset) STUDIO_ID (muted) STUDIO_ID (loopStart) STUDIO_ID (loopEnd)
-    STUDIO_ID (clipId)
+    STUDIO_ID (clipId) STUDIO_ID (INSERTS) STUDIO_ID (INSERT) STUDIO_ID (insert) STUDIO_ID (index)
    #undef STUDIO_ID
 }
 
@@ -88,6 +89,7 @@ public:
             edit->deleteTrack (t);
 
         studio.setProperty (IDs::swing, 0.0, nullptr);
+        ensureInserts();
         const int pattern = addPattern ("Pattern 1");
         setCurrentPattern (pattern);
 
@@ -229,6 +231,9 @@ public:
     }
 
     int getSelectedChannel() const { return selectedChannel; }
+
+    // Called just before a project is replaced (New / Open).
+    std::vector<std::function<void()>> editAboutToChange;
     int newId()                    { return takeNextId(); }
 
     void selectChannel (int channelId)
@@ -311,6 +316,158 @@ public:
             return juce::Colour::fromString (pattern[IDs::colour].toString());
         static const juce::uint32 palette[] = { 0xff5f8fd8, 0xff63b56d, 0xffd88a4c, 0xffb46ed0, 0xffd45d6c, 0xff4fb3b0, 0xffc9b64c, 0xff8a8fd9 };
         return juce::Colour (palette[(int) pattern[IDs::id] % 8]);
+    }
+
+    //==========================================================================
+    // Mixer: inserts 1..numInserts are AudioTracks; insert 0 is the master.
+
+    static constexpr int numInserts = 20;
+
+    juce::ValueTree getInserts() const { return studio.getChildWithName (IDs::INSERTS); }
+
+    te::AudioTrack* getInsertTrack (int index) const
+    {
+        const auto insert = getInserts().getChildWithProperty (IDs::index, index);
+        return insert.isValid() ? te::findAudioTrackForID (*edit, te::EditItemID::fromVar (insert[IDs::track])) : nullptr;
+    }
+
+    juce::String getInsertName (int index) const
+    {
+        if (index == 0) return "Master";
+        return getInserts().getChildWithProperty (IDs::index, index)[IDs::name].toString();
+    }
+
+    void renameInsert (int index, const juce::String& name)
+    {
+        auto insert = getInserts().getChildWithProperty (IDs::index, index);
+        insert.setProperty (IDs::name, name, &undo());
+        if (auto t = getInsertTrack (index))
+            t->setName (name);
+    }
+
+    te::PluginList& getInsertPlugins (int index) const
+    {
+        if (auto t = getInsertTrack (index))
+            return t->pluginList;
+        return edit->getMasterPluginList();
+    }
+
+    te::VolumeAndPanPlugin* getInsertVolume (int index) const
+    {
+        if (auto t = getInsertTrack (index))
+            return t->getVolumePlugin();
+        return edit->getMasterVolumePlugin().get();
+    }
+
+    te::LevelMeterPlugin* getInsertMeter (int index) const
+    {
+        if (auto t = getInsertTrack (index))
+            return t->getLevelMeterPlugin();
+        return edit->getMasterPluginList().findFirstPluginOfType<te::LevelMeterPlugin>();
+    }
+
+    static bool isMixerUtility (te::Plugin* p)
+    {
+        return dynamic_cast<te::VolumeAndPanPlugin*> (p) != nullptr || dynamic_cast<te::LevelMeterPlugin*> (p) != nullptr
+            || dynamic_cast<te::AuxReturnPlugin*> (p) != nullptr || dynamic_cast<te::AuxSendPlugin*> (p) != nullptr;
+    }
+
+    // The insert's effect slots, in order.
+    juce::Array<te::Plugin*> getInsertEffects (int index) const
+    {
+        juce::Array<te::Plugin*> fx;
+        for (auto p : getInsertPlugins (index).getPlugins())
+            if (! isMixerUtility (p))
+                fx.add (p);
+        return fx;
+    }
+
+    juce::Array<te::AuxSendPlugin*> getInsertSends (int index) const
+    {
+        juce::Array<te::AuxSendPlugin*> sends;
+        if (index > 0)
+            for (auto p : getInsertPlugins (index).getPlugins())
+                if (auto s = dynamic_cast<te::AuxSendPlugin*> (p))
+                    sends.add (s);
+        return sends;
+    }
+
+    static constexpr int maxEffectSlots = 10;
+
+    te::Plugin::Ptr addEffect (int index, const juce::String& xmlType)
+    {
+        if (getInsertEffects (index).size() >= maxEffectSlots)
+            return {};
+
+        undo().beginNewTransaction ("Add effect");
+        auto plugin = edit->getPluginCache().createNewPlugin (xmlType, {});
+        if (plugin == nullptr)
+            return {};
+
+        // Effects go before the fader / meter (pre-fader chain, like FL's insert slots).
+        auto& list = getInsertPlugins (index);
+        int position = 0;
+        for (auto p : list.getPlugins())
+        {
+            if (dynamic_cast<te::VolumeAndPanPlugin*> (p) != nullptr || dynamic_cast<te::LevelMeterPlugin*> (p) != nullptr
+                || dynamic_cast<te::AuxSendPlugin*> (p) != nullptr)
+                break;
+            ++position;
+        }
+        list.insertPlugin (plugin, position, nullptr);
+        return plugin;
+    }
+
+    void removePlugin (te::Plugin& p)
+    {
+        undo().beginNewTransaction ("Remove plugin");
+        p.deleteFromParent();
+    }
+
+    // FL "route to this track": an aux send on `from` feeding an aux return on `to`.
+    void addSend (int from, int to)
+    {
+        auto source = getInsertTrack (from);
+        auto dest = getInsertTrack (to);
+        if (source == nullptr || dest == nullptr || from == to)
+            return;
+
+        undo().beginNewTransaction ("Add send");
+        if (dest->pluginList.findFirstPluginOfType<te::AuxReturnPlugin>() == nullptr)
+        {
+            auto ret = edit->getPluginCache().createNewPlugin (te::AuxReturnPlugin::xmlTypeName, {});
+            ret->state.setProperty (te::IDs::busNum, to - 1, nullptr);
+            dest->pluginList.insertPlugin (ret, 0, nullptr);
+        }
+
+        auto send = edit->getPluginCache().createNewPlugin (te::AuxSendPlugin::xmlTypeName, {});
+        send->state.setProperty (te::IDs::busNum, to - 1, nullptr);
+        int position = 0;
+        for (auto p : source->pluginList.getPlugins())
+        {
+            if (dynamic_cast<te::VolumeAndPanPlugin*> (p) != nullptr || dynamic_cast<te::LevelMeterPlugin*> (p) != nullptr)
+                break;
+            ++position;
+        }
+        source->pluginList.insertPlugin (send, position, nullptr);
+        edit->setAuxBusName (to - 1, getInsertName (to));
+    }
+
+    int getChannelInsert (int channelId) const { return getChannel (channelId)[IDs::insert]; }
+
+    // Routes a channel to a mixer insert (0 = master), like FL's channel "FX" number.
+    void setChannelInsert (int channelId, int index)
+    {
+        auto channel = getChannel (channelId);
+        index = juce::jlimit (0, numInserts, index);
+        channel.setProperty (IDs::insert, index, &undo());
+        if (auto t = getTrack (channel))
+        {
+            if (auto dest = getInsertTrack (index))
+                t->getOutput().setOutputToTrack (dest);
+            else
+                t->getOutput().setOutputToDefaultDevice (false);
+        }
     }
 
     //==========================================================================
@@ -490,6 +647,7 @@ private:
     //==========================================================================
     void finishLoading()
     {
+        ensureInserts();
         selectedChannel = getChannels().getChild (0)[IDs::id];
         updateMidiInputTarget();
         regenerateNow();
@@ -500,6 +658,10 @@ private:
 
     void setEdit (std::unique_ptr<te::Edit> newEdit)
     {
+        // UI holding plugin/parameter pointers must let go before the old Edit dies.
+        for (auto& fn : editAboutToChange)
+            fn();
+
         if (edit != nullptr)
         {
             studio.removeListener (this);
@@ -514,7 +676,7 @@ private:
         edit->getTransport().looping = true;
 
         studio = edit->state.getOrCreateChildWithName (IDs::STUDIO, nullptr);
-        for (auto type : { IDs::CHANNELS, IDs::PATTERNS, IDs::PLAYLIST })
+        for (auto type : { IDs::CHANNELS, IDs::PATTERNS, IDs::PLAYLIST, IDs::INSERTS })
             studio.getOrCreateChildWithName (type, nullptr);
 
         studio.addListener (this);
@@ -527,6 +689,25 @@ private:
         const int id = (int) studio.getProperty (IDs::nextId, 1);
         studio.setProperty (IDs::nextId, id + 1, nullptr);
         return id;
+    }
+
+    void ensureInserts()
+    {
+        auto inserts = getInserts();
+        for (int i = inserts.getNumChildren() + 1; i <= numInserts; ++i)
+        {
+            auto track = edit->insertNewAudioTrack (te::TrackInsertPoint::getEndOfTracks (*edit), nullptr);
+            track->setName ("Insert " + juce::String (i));
+            juce::ValueTree insert (IDs::INSERT);
+            insert.setProperty (IDs::index, i, nullptr);
+            insert.setProperty (IDs::name, "Insert " + juce::String (i), nullptr);
+            insert.setProperty (IDs::track, track->itemID.toVar(), nullptr);
+            inserts.appendChild (insert, nullptr);
+        }
+
+        auto& master = edit->getMasterPluginList();
+        if (master.findFirstPluginOfType<te::LevelMeterPlugin>() == nullptr)
+            master.insertPlugin (edit->getPluginCache().createNewPlugin (te::LevelMeterPlugin::xmlTypeName, {}), -1, nullptr);
     }
 
     te::AudioTrack* createChannelTrack (const juce::String& name)
