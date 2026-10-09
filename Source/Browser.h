@@ -2,6 +2,7 @@
 
 #include "Studio.h"
 #include "Widgets.h"
+#include "Effects.h"
 
 // Plays audio files for preview, alongside the engine's output.
 // Streams from disk on a background thread (never reads files on the audio thread).
@@ -54,8 +55,72 @@ public:
     static inline const juce::String dragPrefix = "file:";
     std::function<void (const juce::File&)> onOpenProject;
     std::function<void (const juce::PluginDescription&)> onPluginChosen; // double-click a plugin
+    std::function<void (const juce::File&)> onEditAudio;                // right-click a sound > Edit audio
+
+    // A factory or user preset of one plugin type (synth or effect).
+    struct PresetEntry
+    {
+        juce::String pluginType, group, name;
+        const Presets::Preset* factory = nullptr;
+        juce::File userFile;
+    };
+    std::function<void (const PresetEntry&)> onPresetChosen;            // double-click a preset
 
     void refreshPlugins() { rebuild(); }
+
+    // Search: every word of the query must appear in the name (case-insensitive).
+    static bool matchesSearch (const juce::String& name, const juce::String& query)
+    {
+        for (auto& word : juce::StringArray::fromTokens (query, " ", {}))
+            if (word.isNotEmpty() && ! name.containsIgnoreCase (word))
+                return false;
+        return true;
+    }
+
+    // Sounds / instruments / projects under `roots` (recursively) whose names match.
+    static juce::Array<juce::File> searchFiles (const juce::Array<juce::File>& roots, const juce::String& query,
+                                                const juce::String& audioWildcard, int limit = 300)
+    {
+        // ponytail: walks the folders on every keystroke; build an index if libraries get huge.
+        juce::Array<juce::File> found;
+        for (auto& root : roots)
+            for (const auto& entry : juce::RangedDirectoryIterator (root, true, "*", juce::File::findFiles | juce::File::ignoreHiddenFiles))
+            {
+                const auto f = entry.getFile();
+                if ((Item::isAudioFile (f, audioWildcard) || f.hasFileExtension (Studio::fileExtension) || MultiSampler::isInstrumentFile (f))
+                    && matchesSearch (f.getFileNameWithoutExtension(), query))
+                {
+                    found.add (f);
+                    if (found.size() >= limit)
+                        return found;
+                }
+            }
+        return found;
+    }
+
+    // Every preset by plugin type: our synths, built-in effects, then any other user preset folders.
+    static std::vector<PresetEntry> allPresets()
+    {
+        std::vector<std::pair<juce::String, juce::String>> types { { te::FourOscPlugin::xmlTypeName, "4-OSC Synth" },
+                                                                    { FMSynthPlugin::xmlTypeName, "FM Synth" } };
+        for (auto& e : Effects::builtIn())
+            types.push_back ({ e.xmlType, e.name });
+        for (auto& dir : Presets::getUserFolder().findChildFiles (juce::File::findDirectories, false))
+            if (std::none_of (types.begin(), types.end(), [&] (auto& t) { return t.first == dir.getFileName(); }))
+                types.push_back ({ dir.getFileName(), dir.getFileName() });
+
+        std::vector<PresetEntry> list;
+        for (auto& [type, group] : types)
+        {
+            for (auto& preset : Presets::factory (type))
+                list.push_back ({ type, group, preset.name, &preset, {} });
+            auto files = Presets::getUserFolder().getChildFile (type).findChildFiles (juce::File::findFiles, false, "*.xml");
+            files.sort();
+            for (auto& f : files)
+                list.push_back ({ type, group, f.getFileNameWithoutExtension(), nullptr, f });
+        }
+        return list;
+    }
 
     Browser (te::Engine& e, juce::PropertiesFile& s) : engine (e), settings (s), preview (e)
     {
@@ -64,6 +129,12 @@ public:
         tree.setColour (juce::TreeView::backgroundColourId, Theme::panelDark);
         tree.setIndentSize (14);
         addAndMakeVisible (tree);
+
+        search.setTextToShowWhenEmpty ("Search sounds, presets, plugins", Theme::textDim);
+        search.setTooltip ("Type to find sounds, presets and plugins by name");
+        search.onTextChange = [this] { rebuild(); };
+        search.onEscapeKey = [this] { search.clear(); rebuild(); };
+        addAndMakeVisible (search);
 
         addFolderButton.setTooltip ("Add a folder of your own sounds to the browser");
         addFolderButton.onClick = [this] { chooseFolder(); };
@@ -92,6 +163,7 @@ public:
         auto r = getLocalBounds().withTrimmedRight (1);
         auto header = r.removeFromTop (headerHeight);
         addFolderButton.setBounds (header.removeFromRight (headerHeight).reduced (3));
+        search.setBounds (r.removeFromTop (26).reduced (4, 2));
         tree.setBounds (r);
     }
 
@@ -156,6 +228,12 @@ private:
             {
                 juce::PopupMenu m;
                 m.addItem ("Remove from browser", [b = &browser, f = file] { b->removeUserFolder (f); });
+                m.showMenuAsync ({});
+            }
+            else if (e.mods.isPopupMenu() && isAudioFile (file, browser.engine.getAudioFileFormatManager().readFormatManager.getWildcardForAllFormats()))
+            {
+                juce::PopupMenu m;
+                m.addItem ("Edit audio...", [b = &browser, f = file] { if (b->onEditAudio) b->onEditAudio (f); });
                 m.showMenuAsync ({});
             }
         }
@@ -240,6 +318,48 @@ private:
         juce::String name;
     };
 
+    struct PresetItem : public juce::TreeViewItem
+    {
+        PresetItem (Browser& b, PresetEntry e) : browser (b), entry (std::move (e)) {}
+
+        bool mightContainSubItems() override { return false; }
+        int getItemHeight() const override   { return 22; }
+
+        void paintItem (juce::Graphics& g, int w, int h) override
+        {
+            if (isSelected())
+            {
+                g.setColour (Theme::accent.withAlpha (0.25f));
+                g.fillRect (0, 0, w, h);
+            }
+            g.setColour (Theme::textDim.brighter (0.3f));
+            g.setFont (Theme::font (13.0f, entry.userFile != juce::File()));
+            g.drawText (entry.name, 4, 0, w - 4, h, juce::Justification::centredLeft, true);
+        }
+
+        void itemDoubleClicked (const juce::MouseEvent&) override { if (browser.onPresetChosen) browser.onPresetChosen (entry); }
+        juce::String getTooltip() override { return entry.group + " preset" + (entry.userFile != juce::File() ? " (yours)" : "") + ". Double-click to load it on the selected channel or mixer effect"; }
+        juce::String getUniqueName() const override { return entry.pluginType + "/" + entry.name; }
+
+        Browser& browser;
+        PresetEntry entry;
+    };
+
+    juce::TreeViewItem* createPresetsGroup (const juce::String& query = {})
+    {
+        auto* group = new GroupItem ("Presets");
+        GroupItem* current = nullptr;
+        for (auto& p : allPresets())
+        {
+            if (! matchesSearch (p.name, query) && ! matchesSearch (p.group, query))
+                continue;
+            if (current == nullptr || current->name != p.group)
+                group->addSubItem (current = new GroupItem (p.group));
+            current->addSubItem (new PresetItem (*this, p));
+        }
+        return group;
+    }
+
     bool isFavorite (const juce::PluginDescription& d) const
     {
         return juce::StringArray::fromLines (settings.getValue ("pluginFavorites")).contains (d.createIdentifierString());
@@ -312,11 +432,41 @@ private:
     {
         tree.setRootItem (nullptr);
         root = std::make_unique<Root>();
+
+        if (const auto query = search.getText().trim(); query.isNotEmpty())
+        {
+            juce::Array<juce::File> roots { DrumKit::getPacksFolder(), Studio::getProjectsFolder() };
+            for (auto& path : getUserFolders())
+                if (juce::File (path).isDirectory())
+                    roots.add (juce::File (path));
+            auto* sounds = new GroupItem ("Sounds");
+            for (auto& f : searchFiles (roots, query, engine.getAudioFileFormatManager().readFormatManager.getWildcardForAllFormats()))
+                sounds->addSubItem (new Item (*this, f));
+            auto* plugins = new GroupItem ("Plugins");
+            for (auto& d : engine.getPluginManager().knownPluginList.getTypes())
+                if (matchesSearch (d.name, query))
+                    plugins->addSubItem (new PluginItem (*this, d));
+            for (auto* g : { sounds, dynamic_cast<GroupItem*> (createPresetsGroup (query)), plugins })
+                if (g->getNumSubItems() > 0)
+                    root->addSubItem (g);
+                else
+                    delete g;
+            tree.setRootItem (root.get());
+            root->setOpen (true);
+            for (int i = 0; i < root->getNumSubItems(); ++i)
+                root->getSubItem (i)->setOpen (true);
+            for (int i = 0; i < root->getNumSubItems(); ++i)  // preset groups too
+                for (int k = 0; k < root->getSubItem (i)->getNumSubItems(); ++k)
+                    root->getSubItem (i)->getSubItem (k)->setOpen (true);
+            return;
+        }
+
         root->addSubItem (new Item (*this, DrumKit::getPacksFolder(), "Packs"));
         root->addSubItem (new Item (*this, Studio::getProjectsFolder(), "Projects"));
         for (auto& path : getUserFolders())
             if (juce::File (path).isDirectory())
                 root->addSubItem (new Item (*this, juce::File (path)));
+        root->addSubItem (createPresetsGroup());
         root->addSubItem (createPluginsGroup());
         tree.setRootItem (root.get());
         root->setOpen (true);
@@ -332,5 +482,6 @@ private:
     juce::TreeView tree;
     std::unique_ptr<Root> root;
     juce::TextButton addFolderButton { "+" };
+    juce::TextEditor search;
     std::unique_ptr<juce::FileChooser> chooser;
 };

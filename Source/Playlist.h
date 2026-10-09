@@ -16,6 +16,7 @@ class Playlist : public juce::Component,
 public:
     enum class Tool { pencil, brush, erase, select, slice, mute };
     std::function<void()> onShowChannelRack;
+    std::function<void (int channelId)> onEditAudio;
 
     explicit Playlist (Studio& s) : studio (s)
     {
@@ -137,6 +138,19 @@ private:
         }
     }
 
+    static void askNumber (const juce::String& title, const juce::String& message, double value, std::function<void (double)> onOk)
+    {
+        auto* w = new juce::AlertWindow (title, message, juce::MessageBoxIconType::NoIcon);
+        w->addTextEditor ("value", juce::String (value));
+        w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+        w->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+        w->enterModalState (true, juce::ModalCallbackFunction::create ([w, onOk] (int r)
+        {
+            if (r == 1 && w->getTextEditorContents ("value").trim().containsAnyOf ("0123456789"))
+                onOk (w->getTextEditorContents ("value").getDoubleValue());
+        }), true);
+    }
+
     double snapFloor (double b) const { const double s = getSnap(); return s > 0 ? std::floor (b / s + 1.0e-6) * s : b; }
     double snapRound (double b) const { const double s = getSnap(); return s > 0 ? std::round (b / s) * s : b; }
 
@@ -239,9 +253,12 @@ private:
     };
 
     //==========================================================================
-    struct Grid : public juce::Component, private juce::ChangeListener
+    struct Grid : public juce::Component, public juce::SettableTooltipClient, private juce::ChangeListener
     {
-        explicit Grid (Playlist& p) : list (p) {}
+        explicit Grid (Playlist& p) : list (p)
+        {
+            setTooltip ("Right-click an audio clip's title bar: edit audio, stretch to tempo, pitch. Right-click elsewhere deletes");
+        }
         ~Grid() override { thumbnails.clear(); }
 
         void paint (juce::Graphics& g) override
@@ -309,7 +326,12 @@ private:
                                     : (automation ? c[IDs::name].toString() : pattern[IDs::name].toString());
             g.setColour (juce::Colours::black.withAlpha (0.85f));
             g.setFont (Theme::font (11.0f, true));
-            g.drawText (name, r.withHeight (13).reduced (4, 0), juce::Justification::centredLeft, true);
+            juce::String tags;
+            if (audio && (bool) c[IDs::stretch])
+                tags << juce::String::fromUTF8 (" \xe2\x86\x94");  // stretched to tempo
+            if (audio && std::abs ((double) c[IDs::pitch]) > 1.0e-6)
+                tags << " " << ((double) c[IDs::pitch] > 0 ? "+" : "") << juce::String ((double) c[IDs::pitch], 1) << "st";
+            g.drawText (name + tags, r.withHeight (13).reduced (4, 0), juce::Justification::centredLeft, true);
 
             auto body = r.withTrimmedTop (14).reduced (2, 2);
             g.saveState();
@@ -353,7 +375,8 @@ private:
             {
                 if (auto* thumb = getThumbnail (juce::File (list.studio.getChannel (c[IDs::channel])[IDs::file].toString())))
                 {
-                    const double secondsPerBeat = 60.0 / list.studio.getBpm();
+                    const bool stretch = (bool) c[IDs::stretch] && (double) c[IDs::origBpm] > 0.0;
+                    const double secondsPerBeat = 60.0 / (stretch ? (double) c[IDs::origBpm] : list.studio.getBpm());
                     const double offsetSeconds = (double) c[IDs::offset] * secondsPerBeat;
                     g.setColour (colour.brighter (0.4f));
                     thumb->drawChannel (g, body, offsetSeconds, offsetSeconds + (double) c[IDs::length] * secondsPerBeat, 0, 1.0f);
@@ -459,6 +482,13 @@ private:
                 draggedClip = hit;
                 mode = Mode::point;
                 mouseDrag (e);
+                return;
+            }
+
+            // Right-click an audio clip's title bar: clip options (FL's clip menu).
+            if (e.mods.isPopupMenu() && hit.isValid() && Studio::isAudioClip (hit) && e.y < list.clipBounds (hit).getY() + 14)
+            {
+                showAudioClipMenu (hit);
                 return;
             }
 
@@ -680,6 +710,34 @@ private:
         juce::ValueTree draggedPoint, draggedClip;
         struct Original { juce::ValueTree clip; double start, length, offset; int lane; };
 
+        void showAudioClipMenu (juce::ValueTree clip)
+        {
+            auto& st = list.studio;
+            const int channelId = clip[IDs::channel];
+            const bool stretch = clip[IDs::stretch];
+            juce::PopupMenu m;
+            m.addItem ("Edit audio...", [this, channelId] { if (list.onEditAudio) list.onEditAudio (channelId); });
+            m.addSeparator();
+            m.addItem ("Stretch to tempo", true, stretch, [&st, clip, stretch] { st.setClipStretch (clip, ! stretch); });
+            m.addItem ("Pitch... (" + juce::String ((double) clip[IDs::pitch], 1) + " st)", [&st, clip]
+            {
+                askNumber ("Pitch", "Semitones (-24 .. +24)", clip[IDs::pitch], [&st, clip] (double v) { st.setClipPitch (clip, v); });
+            });
+            const double orig = clip[IDs::origBpm];
+            m.addItem ("Set original BPM..." + (orig > 0.0 ? " (" + juce::String (orig, 2) + ")" : juce::String()), [&st, clip, orig]
+            {
+                askNumber ("Original BPM", "The tempo the sound was recorded at", orig > 0.0 ? orig : st.getBpm(),
+                           [&st, clip] (double v) { st.setClipOriginalBpm (clip, v); });
+            });
+            m.addSeparator();
+            m.addItem ("Delete", [this, clip]
+            {
+                list.studio.undo().beginNewTransaction ("Delete clips");
+                list.deleteClip (clip);
+            });
+            m.showMenuAsync ({});
+        }
+
         void slice (juce::ValueTree c, double at)
         {
             const double start = c[IDs::start], length = c[IDs::length], offset = c[IDs::offset];
@@ -709,7 +767,10 @@ private:
     //==========================================================================
     struct Ruler : public juce::Component, public juce::SettableTooltipClient
     {
-        explicit Ruler (Playlist& p) : list (p) { setTooltip ("Click: jump here. Drag: set loop region. Double-click: clear loop"); }
+        explicit Ruler (Playlist& p) : list (p)
+        {
+            setTooltip ("Click: jump here. Drag: set loop region. Double-click: clear loop. Right-click: tempo changes");
+        }
 
         void paint (juce::Graphics& g) override
         {
@@ -734,6 +795,16 @@ private:
                 g.drawText (juce::String (b + 1), x + 3, 0, 40, getHeight(), juce::Justification::centredLeft);
             }
 
+            // Tempo change markers.
+            g.setFont (Theme::font (10.0f, true));
+            for (auto t : list.studio.getTempoChanges())
+            {
+                const int x = list.beatToX (t[IDs::pos]) - offset;
+                g.setColour (juce::Colour (0xffe8b04a));
+                g.fillRect (x, 0, 2, getHeight());
+                g.drawText (juce::String ((double) t[IDs::bpm], 1), x + 3, 0, 44, 11, juce::Justification::centredLeft);
+            }
+
             if (list.studio.isSongMode())
             {
                 const int x = list.beatToX (list.studio.getPositionBeats()) - offset;
@@ -746,10 +817,52 @@ private:
 
         double beatAt (int x) const { return list.snapRound (list.xToBeat (x + list.viewport.getViewPositionX())); }
 
-        void mouseDown (const juce::MouseEvent& e) override { downBeat = beatAt (e.x); }
+        void mouseDown (const juce::MouseEvent& e) override
+        {
+            downBeat = beatAt (e.x);
+            menuShown = e.mods.isPopupMenu();
+            if (menuShown)
+                showTempoMenu (e.x);
+        }
+
+        juce::ValueTree tempoChangeNear (int x) const
+        {
+            for (auto t : list.studio.getTempoChanges())
+                if (std::abs (list.beatToX (t[IDs::pos]) - list.viewport.getViewPositionX() - x) < 6)
+                    return t;
+            return {};
+        }
+
+        void showTempoMenu (int x)
+        {
+            auto& st = list.studio;
+            const double beat = juce::jmax (Studio::stepBeats, list.snapRound (list.xToBeat (x + list.viewport.getViewPositionX())));
+            const auto existing = tempoChangeNear (x);
+            juce::PopupMenu m;
+            if (existing.isValid())
+            {
+                m.addItem ("Edit tempo change...", [&st, existing]
+                {
+                    askNumber ("Tempo change", "BPM from here on", existing[IDs::bpm],
+                               [&st, existing] (double v) { st.addTempoChange (existing[IDs::pos], v); });
+                });
+                m.addItem ("Remove tempo change", [&st, existing] { st.removeTempoChange (existing); });
+            }
+            else
+            {
+                m.addItem ("Add tempo change here...", [&st, beat]
+                {
+                    askNumber ("Tempo change", "BPM from bar " + juce::String (beat / st.getBarBeats() + 1.0, 2) + " on",
+                               st.getBpmAtBeat (beat), [&st, beat] (double v) { st.addTempoChange (beat, v); });
+                });
+            }
+            m.showMenuAsync ({});
+        }
 
         void mouseDrag (const juce::MouseEvent& e) override
         {
+            if (menuShown)
+                return;
             const double b = beatAt (e.x);
             if (std::abs (b - downBeat) > 1.0e-6)
                 list.studio.setSongLoop ({ juce::jmin (b, downBeat), juce::jmax (b, downBeat) });
@@ -758,7 +871,7 @@ private:
 
         void mouseUp (const juce::MouseEvent& e) override
         {
-            if (e.getDistanceFromDragStart() < 3)
+            if (e.getDistanceFromDragStart() < 3 && ! menuShown)
             {
                 list.studio.setSongMode (true);
                 list.studio.setPositionBeats (downBeat);
@@ -769,6 +882,7 @@ private:
 
         Playlist& list;
         double downBeat = 0.0;
+        bool menuShown = false;
     };
 
     //==========================================================================

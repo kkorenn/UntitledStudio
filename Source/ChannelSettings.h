@@ -29,6 +29,10 @@ public:
         };
         addAndMakeVisible (root);
 
+        editButton.setTooltip ("Open the sample in the audio editor (cut, fade, normalize, reverse...)");
+        editButton.onClick = [this] { if (onEditSample) onEditSample(); };
+        addAndMakeVisible (editButton);
+
         replaceButton.setTooltip ("Load a different sample (or drag one here from the browser)");
         replaceButton.onClick = [this] { browseForSample(); };
         addAndMakeVisible (replaceButton);
@@ -39,6 +43,8 @@ public:
 
     ~SamplerView() override { thumbnail.removeChangeListener (this); }
 
+    std::function<void()> onEditSample;
+
     void paint (juce::Graphics& g) override
     {
         g.fillAll (Theme::panelDark);
@@ -47,7 +53,7 @@ public:
         auto top = r.removeFromTop (24);
         g.setColour (Theme::text);
         g.setFont (Theme::font (14.0f, true));
-        g.drawText (channel[IDs::name].toString(), top.withTrimmedRight (260), juce::Justification::centredLeft, true);
+        g.drawText (channel[IDs::name].toString(), top.withTrimmedRight (366), juce::Justification::centredLeft, true);
         g.setColour (Theme::textDim);
         g.setFont (Theme::font (12.0f));
         g.drawText ("ROOT", rootLabelArea, juce::Justification::centredRight);
@@ -88,6 +94,8 @@ public:
     {
         auto top = getLocalBounds().reduced (10).removeFromTop (24);
         replaceButton.setBounds (top.removeFromRight (130));
+        top.removeFromRight (6);
+        editButton.setBounds (top.removeFromRight (100));
         top.removeFromRight (10);
         root.setBounds (top.removeFromRight (56));
         rootLabelArea = top.removeFromRight (40);
@@ -206,7 +214,7 @@ private:
     juce::File currentFile;
     Widgets::DragNumber root { 0.0, 127.0, 0.25 };
     juce::Rectangle<int> rootLabelArea;
-    juce::TextButton replaceButton { "Replace sample..." };
+    juce::TextButton replaceButton { "Replace sample..." }, editButton { "Edit sample..." };
     std::unique_ptr<juce::FileChooser> chooser;
     int draggingMarker = 0;
     bool dragOver = false;
@@ -351,6 +359,10 @@ public:
         };
         addChildComponent (presets);
 
+        editButton.setTooltip ("Open the sample in the audio editor (cut, fade, normalize, reverse...)");
+        editButton.onClick = [this] { if (onEditSample) onEditSample(); };
+        addChildComponent (editButton);
+
         loop.setTooltip ("Loop the sample while the note is held");
         loop.onClick = [this] { setLoop (loop.getToggleState() ? "loop_continuous" : "no_loop"); };
         addChildComponent (loop);
@@ -375,6 +387,7 @@ public:
     }
 
     bool isDrumPad() const { return studio.getChannel (channelId)[IDs::type].toString() == ChannelType::drumpad; }
+    std::function<void()> onEditSample;
 
     // A plain audio file instrument: one region we can loop.
     bool isSingleSample() const { return plugin->usesRegionState() && plugin->getRegionStates().size() == 1; }
@@ -415,6 +428,7 @@ public:
         auto r = getLocalBounds().reduced (10);
         auto header = r.removeFromTop (38);
         presets.setBounds (header.removeFromRight (240).withHeight (24));
+        editButton.setBounds (getLocalBounds().reduced (10).removeFromTop (24).removeFromRight (100));
 
         r.removeFromTop (6);
         auto knobRow = r.removeFromTop (48);
@@ -475,7 +489,7 @@ private:
         presets.setSelectedItemIndex (plugin->getProgram(), juce::dontSendNotification);
 
         const bool single = isSingleSample() && info.firstRegionLength > 0;
-        for (auto* c : std::initializer_list<juce::Component*> { &loop, &loopStart, &loopEnd })
+        for (auto* c : std::initializer_list<juce::Component*> { &loop, &loopStart, &loopEnd, &editButton })
             c->setVisible (single);
         if (single)
         {
@@ -498,6 +512,7 @@ private:
     juce::StringArray knobLabels, shownPresets;
     juce::ComboBox presets;
     Widgets::LedButton loop { "Loop" };
+    juce::TextButton editButton { "Edit sample..." };
     Widgets::DragNumber loopStart { 0.0, 100.0, 0.25 }, loopEnd { 0.0, 100.0, 0.25 };
     std::unique_ptr<DrumPadGrid> pads;
 };
@@ -659,6 +674,85 @@ private:
     juce::Rectangle<int> diagramArea;
 };
 
+// FL-style arpeggiator settings. Stored on the channel; applied when its notes are generated.
+class ArpControls : public juce::Component, private juce::Timer
+{
+public:
+    ArpControls (Studio& s, int channel) : studio (s), channelId (channel)
+    {
+        mode.addItemList (Arp::modeNames(), 1);
+        mode.setTooltip ("Arpeggiator: held notes and chords play one note at a time");
+        mode.onChange = [this] { set (IDs::arp, mode.getSelectedItemIndex()); };
+        rate.addItemList ({ "1/32", "1/16", "1/8", "1/4" }, 1);
+        rate.setTooltip ("Arpeggiator speed");
+        rate.onChange = [this] { if (rate.getSelectedItemIndex() >= 0) set (IDs::arpRate, rates[(size_t) rate.getSelectedItemIndex()]); };
+        octaves.format = [] (double v) { return juce::String (juce::roundToInt (v)) + " oct"; };
+        octaves.setTooltip ("Arpeggiator range in octaves");
+        octaves.onChange = [this] (double v) { set (IDs::arpOctaves, juce::roundToInt (v)); };
+        gate.format = [] (double v) { return juce::String (juce::roundToInt (v)) + "%"; };
+        gate.setTooltip ("Arpeggiator gate: note length");
+        gate.onChange = [this] (double v) { set (IDs::arpGate, juce::roundToInt (v)); };
+        for (auto* c : std::initializer_list<juce::Component*> { &mode, &rate, &octaves, &gate })
+            addAndMakeVisible (c);
+        sync();
+        startTimerHz (5);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.fillAll (Theme::panel);
+        g.setColour (Theme::text);
+        g.setFont (Theme::font (12.0f, true));
+        g.drawText ("ARP", 10, 0, 40, getHeight(), juce::Justification::centredLeft);
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (4).withTrimmedLeft (46);
+        mode.setBounds (r.removeFromLeft (100));
+        r.removeFromLeft (6);
+        rate.setBounds (r.removeFromLeft (70));
+        r.removeFromLeft (6);
+        octaves.setBounds (r.removeFromLeft (60));
+        r.removeFromLeft (6);
+        gate.setBounds (r.removeFromLeft (54));
+    }
+
+private:
+    static constexpr std::array<double, 4> rates { 0.5, 1.0, 2.0, 4.0 }; // in steps
+
+    void set (const juce::Identifier& id, const juce::var& v)
+    {
+        auto channel = studio.getChannel (channelId);
+        if (channel[id] == v)
+            return;
+        studio.undo().beginNewTransaction ("Arpeggiator");
+        channel.setProperty (id, v, &studio.undo());
+    }
+
+    void sync()
+    {
+        const auto channel = studio.getChannel (channelId);
+        mode.setSelectedItemIndex (channel[IDs::arp], juce::dontSendNotification);
+        const double r = channel.getProperty (IDs::arpRate, 1.0);
+        for (size_t i = 0; i < rates.size(); ++i)
+            if (juce::approximatelyEqual (rates[i], r))
+                rate.setSelectedItemIndex ((int) i, juce::dontSendNotification);
+        octaves.setValue (channel.getProperty (IDs::arpOctaves, 1));
+        gate.setValue (channel.getProperty (IDs::arpGate, 90));
+        const bool on = (int) channel[IDs::arp] != Arp::off;
+        for (auto* c : std::initializer_list<juce::Component*> { &rate, &octaves, &gate })
+            c->setAlpha (on ? 1.0f : 0.5f);
+    }
+
+    void timerCallback() override { sync(); }
+
+    Studio& studio;
+    const int channelId;
+    juce::ComboBox mode, rate;
+    Widgets::DragNumber octaves { 1.0, 4.0, 0.05 }, gate { 5.0, 100.0, 0.5 };
+};
+
 // FL's channel settings window: the instrument's controls + a playable keyboard at the bottom.
 class ChannelSettings : public juce::Component, private juce::MidiKeyboardState::Listener
 {
@@ -670,9 +764,17 @@ public:
             if (auto plugin = track->pluginList.getPlugins().getFirst())
             {
                 if (auto sampler = dynamic_cast<te::SamplerPlugin*> (plugin.get()))
-                    editor = std::make_unique<SamplerView> (studio, channelId, *sampler);
+                {
+                    auto view = std::make_unique<SamplerView> (studio, channelId, *sampler);
+                    view->onEditSample = [this] { if (onEditSample) onEditSample (channelId); };
+                    editor = std::move (view);
+                }
                 else if (auto ms = dynamic_cast<MultiSamplerPlugin*> (plugin.get()))
-                    editor = std::make_unique<InstrumentView> (studio, channelId, *ms);
+                {
+                    auto view = std::make_unique<InstrumentView> (studio, channelId, *ms);
+                    view->onEditSample = [this] { if (onEditSample) onEditSample (channelId); };
+                    editor = std::move (view);
+                }
                 else if (auto fm = dynamic_cast<FMSynthPlugin*> (plugin.get()))
                     editor = std::make_unique<FMSynthView> (studio, *fm);
                 else
@@ -688,6 +790,8 @@ public:
                 }
             }
         }
+
+        addAndMakeVisible (arp);
 
         keyboard.setAvailableRange (24, 108);
         keyboard.setLowestVisibleKey (48);
@@ -705,11 +809,13 @@ public:
             setSize (640, 500);
         else
             setSize (isSampler ? 560 : 640, isSampler ? 300 : 460);
+        setSize (getWidth(), getHeight() + arpHeight);
     }
 
     ~ChannelSettings() override { keyboardState.removeListener (this); }
 
     int getChannelId() const { return channelId; }
+    std::function<void (int channelId)> onEditSample;
 
     void paint (juce::Graphics& g) override
     {
@@ -727,6 +833,7 @@ public:
     {
         auto r = getLocalBounds();
         keyboard.setBounds (r.removeFromBottom (70));
+        arp.setBounds (r.removeFromBottom (arpHeight));
         if (synth != nullptr)
             presetButton.setBounds (r.removeFromTop (34).reduced (10, 5).removeFromRight (90));
         if (editor != nullptr)
@@ -750,6 +857,8 @@ private:
     std::unique_ptr<juce::Component> editor;
     te::Plugin::Ptr synth;
     juce::TextButton presetButton { "Presets" };
+    static constexpr int arpHeight = 30;
+    ArpControls arp { studio, channelId };
     juce::MidiKeyboardState keyboardState;
     juce::MidiKeyboardComponent keyboard { keyboardState, juce::MidiKeyboardComponent::horizontalKeyboard };
 };

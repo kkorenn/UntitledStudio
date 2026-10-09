@@ -3,6 +3,7 @@
 #include "DrumKit.h"
 #include "MultiSampler.h"
 #include "SynthPresets.h"
+#include <regex>
 
 namespace te = tracktion;
 
@@ -16,6 +17,8 @@ namespace te = tracktion;
 //     PLAYLIST / PCLIP   (id, type, pattern | channel, lane, start, length, offset, muted)  -- beats
 //       type "automation": (plugin, param, name) / POINT (pos beats in clip, value 0..1, tension)
 //     MAPPINGS / MAP (cc, channel, plugin, param)  -- MIDI controller links
+//     TEMPOS / TEMPOCHANGE (pos beats, bpm)  -- tempo changes after the start (the start tempo is the engine's tempo 0)
+//   PCLIP audio: (stretch = follow tempo, origBpm, pitch semitones)   CHANNEL: (arp, arpRate steps, arpOctaves, arpGate %)
 //
 // Each channel = one Tracktion AudioTrack holding its instrument + one "derived" MidiClip.
 // The derived clip's notes are regenerated from the model (patterns + playlist) whenever the
@@ -32,6 +35,8 @@ namespace IDs
     STUDIO_ID (clipId) STUDIO_ID (INSERTS) STUDIO_ID (INSERT) STUDIO_ID (insert) STUDIO_ID (index)
     STUDIO_ID (POINT) STUDIO_ID (pos) STUDIO_ID (value) STUDIO_ID (tension) STUDIO_ID (plugin) STUDIO_ID (param)
     STUDIO_ID (MAPPINGS) STUDIO_ID (MAP) STUDIO_ID (cc)
+    STUDIO_ID (TEMPOS) STUDIO_ID (TEMPOCHANGE) STUDIO_ID (bpm) STUDIO_ID (stretch) STUDIO_ID (pitch) STUDIO_ID (origBpm)
+    STUDIO_ID (arp) STUDIO_ID (arpRate) STUDIO_ID (arpOctaves) STUDIO_ID (arpGate)
    #undef STUDIO_ID
 }
 
@@ -45,6 +50,74 @@ namespace ChannelType
     inline const juce::String instrument = "instrument"; // MultiSampler: SFZ / SoundFont / WAV / slicer
     inline const juce::String drumpad = "drumpad";       // MultiSampler with 16 pads
     inline const juce::String fm = "fm";                 // our FM Synth
+}
+
+// FL-style arpeggiator. Applied when a channel's derived MIDI clip is generated, so it's
+// deterministic and renders/exports like any other notes.
+namespace Arp
+{
+    enum Mode { off = 0, up, down, upDown, random };
+    inline juce::StringArray modeNames() { return { "Off", "Up", "Down", "Up-down", "Random" }; }
+
+    struct Note { double start, length; int key, velocity; };
+
+    // Every `rate` beats, plays the next of the currently held keys (spread over `octaves`).
+    inline std::vector<Note> apply (const std::vector<Note>& held, int mode, double rate, int octaves, double gate, int seed)
+    {
+        if (mode == off || held.empty() || rate <= 0.0)
+            return held;
+
+        double first = 1.0e12, last = 0.0;
+        for (auto& n : held)
+        {
+            first = juce::jmin (first, n.start);
+            last = juce::jmax (last, n.start + n.length);
+        }
+
+        std::vector<Note> out;
+        std::vector<int> previous;
+        juce::Random rng (seed);
+        int index = 0;
+        for (auto step = std::ceil (first / rate - 1.0e-6); step * rate < last - 1.0e-6; step += 1.0)
+        {
+            const double t = step * rate;
+            std::vector<int> keys;
+            int velocity = 1;
+            double end = t;
+            for (auto& n : held)
+                if (n.start <= t + 1.0e-6 && n.start + n.length > t + 1.0e-6)
+                {
+                    keys.push_back (n.key);
+                    velocity = juce::jmax (velocity, n.velocity);
+                    end = juce::jmax (end, n.start + n.length);
+                }
+
+            std::sort (keys.begin(), keys.end());
+            keys.erase (std::unique (keys.begin(), keys.end()), keys.end());
+            if (keys != previous)
+                index = 0; // new chord: start the pattern again
+            previous = keys;
+            if (keys.empty())
+                continue;
+
+            std::vector<int> sequence;
+            for (int octave = 0; octave < juce::jlimit (1, 4, octaves); ++octave)
+                for (int k : keys)
+                    if (k + 12 * octave <= 127)
+                        sequence.push_back (k + 12 * octave);
+            if (mode == down)
+                std::reverse (sequence.begin(), sequence.end());
+            else if (mode == upDown)
+                for (int i = (int) sequence.size() - 2; i >= 1; --i)
+                    sequence.push_back (sequence[(size_t) i]);
+
+            const int key = mode == random ? sequence[(size_t) rng.nextInt ((int) sequence.size())]
+                                           : sequence[(size_t) (index % (int) sequence.size())];
+            ++index;
+            out.push_back ({ t, juce::jmin (rate * juce::jlimit (0.05, 1.0, gate), end - t), key, velocity });
+        }
+        return out;
+    }
 }
 
 class Studio : private juce::ValueTree::Listener,
@@ -874,8 +947,15 @@ public:
             channelId = addChannelState (*track, ChannelType::audio, file.getFileNameWithoutExtension(), file);
         }
 
-        const double beats = audioFile.getLength() * getBpm() / 60.0;
+        // FL: loops with a tempo in their name ("... 120 BPM") follow the project tempo.
+        const double origBpm = bpmFromFileName (file.getFileNameWithoutExtension());
+        const double beats = audioFile.getLength() * (origBpm > 0.0 ? origBpm : getBpm()) / 60.0;
         juce::ValueTree c (IDs::PCLIP);
+        if (origBpm > 0.0)
+        {
+            c.setProperty (IDs::origBpm, origBpm, nullptr);
+            c.setProperty (IDs::stretch, true, nullptr);
+        }
         c.setProperty (IDs::id, takeNextId(), nullptr);
         c.setProperty (IDs::type, ChannelType::audio, nullptr);
         c.setProperty (IDs::channel, channelId, nullptr);
@@ -884,6 +964,71 @@ public:
         c.setProperty (IDs::length, beats, nullptr);
         getPlaylist().appendChild (c, &undo());
         return c;
+    }
+
+    // "Drum Loop 120 BPM", "loop_92bpm" -> 120, 92. 0 when the name has no tempo.
+    static double bpmFromFileName (const juce::String& name)
+    {
+        static const std::regex re ("(\\d{2,3}(\\.\\d+)?)[ _-]*bpm", std::regex::icase);
+        std::smatch m;
+        const auto text = name.toStdString();
+        if (std::regex_search (text, m, re))
+            if (const double bpm = std::stod (m[1].str()); bpm >= 40.0 && bpm <= 300.0)
+                return bpm;
+        return 0.0;
+    }
+
+    // Audio clip time-stretch (follow the project tempo) and pitch. Changing the speed keeps
+    // the same audio inside the clip, so its length in beats scales.
+    void setClipStretch (juce::ValueTree clip, bool on)
+    {
+        if (on == (bool) clip[IDs::stretch])
+            return;
+        undo().beginNewTransaction ("Stretch to tempo");
+        double orig = clip[IDs::origBpm];
+        if (orig <= 0.0)
+            clip.setProperty (IDs::origBpm, orig = getBpm(), &undo());
+        clip.setProperty (IDs::stretch, on, &undo());
+        scaleClip (clip, on ? orig / getBpm() : getBpm() / orig);
+    }
+
+    void setClipOriginalBpm (juce::ValueTree clip, double bpm)
+    {
+        bpm = juce::jlimit (20.0, 400.0, bpm);
+        undo().beginNewTransaction ("Original tempo");
+        const double old = clip[IDs::origBpm];
+        clip.setProperty (IDs::origBpm, bpm, &undo());
+        if ((bool) clip[IDs::stretch] && old > 0.0)
+            scaleClip (clip, bpm / old);
+    }
+
+    void setClipPitch (juce::ValueTree clip, double semitones)
+    {
+        undo().beginNewTransaction ("Clip pitch");
+        clip.setProperty (IDs::pitch, juce::jlimit (-24.0, 24.0, semitones), &undo());
+    }
+
+    // Audio editor "Apply": points a channel at an edited copy of its audio (one undo step).
+    bool replaceAudioFile (int channelId, const juce::File& file)
+    {
+        auto channel = getChannel (channelId);
+        auto track = getTrack (channel);
+        if (track == nullptr || ! file.existsAsFile())
+            return false;
+
+        undo().beginNewTransaction ("Edit audio");
+        channel.setProperty (IDs::file, file.getFullPathName(), &undo());
+        if (auto sampler = track->pluginList.findFirstPluginOfType<te::SamplerPlugin>())
+        {
+            const int root = sampler->getNumSounds() > 0 ? sampler->getKeyNote (0) : defaultRootNote;
+            setSamplerFile (*sampler, file);
+            sampler->setSoundParams (0, root, 0, 127);
+        }
+        else if (auto ms = getMultiSampler (channelId); ms != nullptr && ms->usesRegionState() && ms->getRegionStates().size() == 1)
+        {
+            ms->getRegionStates().getFirst().setProperty ("sample", file.getFullPathName(), &undo());
+        }
+        return true;
     }
 
     static bool isAudioClip (const juce::ValueTree& clip)      { return clip[IDs::type].toString() == ChannelType::audio; }
@@ -1155,6 +1300,48 @@ public:
 
     bool isPlaying() const               { return transport().isPlaying(); }
 
+    // Tempo changes over the song (ruler markers). Positions are beats, so clips never move
+    // in bars; only their time changes.
+    juce::ValueTree getTempoChanges() const { return studio.getChildWithName (IDs::TEMPOS); }
+
+    juce::ValueTree addTempoChange (double beat, double bpm)
+    {
+        undo().beginNewTransaction ("Tempo change");
+        bpm = juce::jlimit (10.0, 522.0, bpm);
+        for (auto t : getTempoChanges())
+            if (std::abs ((double) t[IDs::pos] - beat) < 1.0e-6)
+            {
+                t.setProperty (IDs::bpm, bpm, &undo());
+                return t;
+            }
+        juce::ValueTree t (IDs::TEMPOCHANGE);
+        t.setProperty (IDs::pos, juce::jmax (stepBeats, beat), nullptr);
+        t.setProperty (IDs::bpm, bpm, nullptr);
+        getTempoChanges().appendChild (t, &undo());
+        return t;
+    }
+
+    void removeTempoChange (const juce::ValueTree& t)
+    {
+        undo().beginNewTransaction ("Remove tempo change");
+        getTempoChanges().removeChild (t, &undo());
+    }
+
+    double getBpmAtBeat (double beat) const { return edit->tempoSequence.getTempoAt (te::BeatPosition::fromBeats (beat)).getBpm(); }
+
+    // Project time signature: beats per bar over quarter notes (model beats are quarter notes;
+    // Tracktion would make x/8 beats eighth notes, so only /4 is offered).
+    int getTimeSigNumerator() const   { return edit->tempoSequence.getTimeSig (0)->numerator; }
+
+    void setTimeSigNumerator (int numerator)
+    {
+        undo().beginNewTransaction ("Time signature");
+        auto& sig = *edit->tempoSequence.getTimeSig (0);
+        sig.numerator = juce::jlimit (1, 16, numerator);
+        sig.denominator = 4;
+        markChanged();
+    }
+
     // FL: Space = play/stop, stop returns to the start.
     void togglePlay()
     {
@@ -1226,7 +1413,7 @@ private:
         edit->getTransport().looping = true;
 
         studio = edit->state.getOrCreateChildWithName (IDs::STUDIO, nullptr);
-        for (auto type : { IDs::CHANNELS, IDs::PATTERNS, IDs::PLAYLIST, IDs::INSERTS, IDs::MAPPINGS })
+        for (auto type : { IDs::CHANNELS, IDs::PATTERNS, IDs::PLAYLIST, IDs::INSERTS, IDs::MAPPINGS, IDs::TEMPOS })
             studio.getOrCreateChildWithName (type, nullptr);
 
         studio.addListener (this);
@@ -1317,6 +1504,41 @@ private:
         sampler.setSoundOpenEnded (0, true); // one-shot, like FL's sampler default
     }
 
+    void scaleClip (juce::ValueTree& clip, double ratio)
+    {
+        clip.setProperty (IDs::length, (double) clip[IDs::length] * ratio, &undo());
+        clip.setProperty (IDs::offset, (double) clip[IDs::offset] * ratio, &undo());
+    }
+
+    // Model tempo changes -> engine tempo sequence (derived, no UndoManager).
+    void syncTempoChanges()
+    {
+        auto tempoState = edit->state.getChildWithName (te::IDs::TEMPOSEQUENCE);
+        juce::Array<juce::ValueTree> engineTempos;
+        for (auto t : tempoState)
+            if (t.hasType (te::IDs::TEMPO))
+                engineTempos.add (t);
+        if (engineTempos.isEmpty())
+            return;
+
+        engineTempos.getReference (0).setProperty (te::IDs::curve, 1.0, nullptr); // jumps, not ramps
+
+        std::vector<std::pair<double, double>> wanted, current;
+        for (auto t : getTempoChanges())
+            wanted.push_back ({ t[IDs::pos], t[IDs::bpm] });
+        std::sort (wanted.begin(), wanted.end());
+        for (int i = 1; i < engineTempos.size(); ++i)
+            current.push_back ({ engineTempos[i][te::IDs::startBeat], engineTempos[i][te::IDs::bpm] });
+        if (wanted == current)
+            return;
+
+        for (int i = 1; i < engineTempos.size(); ++i)
+            tempoState.removeChild (engineTempos[i], nullptr);
+        int index = tempoState.indexOf (engineTempos[0]);
+        for (auto& [beat, bpm] : wanted)
+            tempoState.addChild (te::TempoSetting::create (te::BeatPosition::fromBeats (beat), bpm, 1.0f), ++index, nullptr);
+    }
+
     // Writes playlist automation clips into the engine's parameter curves (song mode only;
     // FL automation clips belong to the playlist). Curves are derived, so no UndoManager.
     void syncAutomation (bool song)
@@ -1387,31 +1609,46 @@ private:
             const double start = pc[IDs::start], length = pc[IDs::length], offset = pc[IDs::offset];
             const auto startTime = tempo.toTime (te::BeatPosition::fromBeats (start));
             const auto endTime = tempo.toTime (te::BeatPosition::fromBeats (start + length));
-            const double offsetSeconds = offset * 60.0 / getBpm();
+
+            // Stretched clips are beat based (Tracktion auto-tempo, stretched in real time);
+            // others play at their own speed, so their offset is source seconds.
+            const bool stretch = (bool) pc[IDs::stretch] && (double) pc[IDs::origBpm] > 0.0;
+            const double pitch = pc[IDs::pitch];
+            const bool stretching = stretch || std::abs (pitch) > 1.0e-6;
+            const double offsetSeconds = stretch ? offset / tempo.getBeatsPerSecondAt (startTime) : offset * 60.0 / getBpm();
 
             juce::ValueTree existing;
             for (auto clip : track.getClips())
                 if ((int) clip->state[IDs::clipId] == id)
                     existing = clip->state;
 
-            if (! existing.isValid())
+            const bool isNew = ! existing.isValid();
+            if (isNew)
             {
                 existing = juce::ValueTree (te::IDs::AUDIOCLIP);
-                existing.setProperty (te::IDs::name, file.getFileNameWithoutExtension(), nullptr);
-                existing.setProperty (te::IDs::source, file.getFullPathName(), nullptr);
                 existing.setProperty (IDs::clipId, id, nullptr);
                 edit->createNewItemID().writeID (existing, nullptr);
-                existing.setProperty (te::IDs::start, startTime.inSeconds(), nullptr);
-                existing.setProperty (te::IDs::length, (endTime - startTime).inSeconds(), nullptr);
-                existing.setProperty (te::IDs::offset, offsetSeconds, nullptr);
-                track.state.addChild (existing, -1, nullptr);
             }
-            else
+
+            existing.setProperty (te::IDs::name, file.getFileNameWithoutExtension(), nullptr);
+            existing.setProperty (te::IDs::source, file.getFullPathName(), nullptr);
+            existing.setProperty (te::IDs::start, startTime.inSeconds(), nullptr);
+            existing.setProperty (te::IDs::length, (endTime - startTime).inSeconds(), nullptr);
+            existing.setProperty (te::IDs::offset, offsetSeconds, nullptr);
+            if (stretch)
             {
-                existing.setProperty (te::IDs::start, startTime.inSeconds(), nullptr);
-                existing.setProperty (te::IDs::length, (endTime - startTime).inSeconds(), nullptr);
-                existing.setProperty (te::IDs::offset, offsetSeconds, nullptr);
+                auto loopInfo = existing.getOrCreateChildWithName (te::IDs::LOOPINFO, nullptr);
+                loopInfo.setProperty (te::IDs::numBeats, te::AudioFile (engine, file).getLength() * (double) pc[IDs::origBpm] / 60.0, nullptr);
+                loopInfo.setProperty (te::IDs::numerator, 4, nullptr);
+                loopInfo.setProperty (te::IDs::denominator, 4, nullptr);
             }
+            existing.setProperty (te::IDs::autoTempo, stretch, nullptr);
+            existing.setProperty (te::IDs::pitchChange, pitch, nullptr);
+            existing.setProperty (te::IDs::elastiqueMode, stretching ? (int) te::TimeStretcher::soundtouchBetter : (int) te::TimeStretcher::disabled, nullptr);
+            existing.setProperty (te::IDs::proxyAllowed, ! stretching, nullptr);
+
+            if (isNew)
+                track.state.addChild (existing, -1, nullptr);
         }
     }
 
@@ -1431,6 +1668,8 @@ private:
     {
         // ponytail: regenerates every channel on any change. Fine for hundreds of notes;
         // switch to per-channel dirty flags if big projects get slow.
+        syncTempoChanges();
+        regeneratedBarBeats = getBarBeats();
         const bool song = isSongMode();
         const double swingShift = getSwing() * stepBeats * (2.0 / 3.0);
         const auto pattern = getCurrentPatternState();
@@ -1455,7 +1694,11 @@ private:
             auto& seq = clip->getSequence();
             seq.clear (nullptr);
 
+            const int arpMode = channel[IDs::arp];
+            std::vector<Arp::Note> notes;
+
             // Notes of pattern `p` that fall inside [offset, offset + clipLength), placed at clipStart.
+            // Swing shifts odd steps (the arp swings its own output instead).
             auto addNotes = [&] (const juce::ValueTree& p, double clipStart, double clipLength, double offset)
             {
                 for (auto note : p)
@@ -1469,12 +1712,11 @@ private:
 
                     double start = note[IDs::start];
                     const double stepIndex = start / stepBeats;
-                    if (std::abs (stepIndex - std::round (stepIndex)) < 1.0e-4 && ((int) std::round (stepIndex)) % 2 == 1)
+                    if (arpMode == Arp::off && std::abs (stepIndex - std::round (stepIndex)) < 1.0e-4 && ((int) std::round (stepIndex)) % 2 == 1)
                         start += swingShift;
 
-                    const double length = juce::jmin ((double) note[IDs::length], clipLength - rel);
-                    seq.addNote (note[IDs::key], te::BeatPosition::fromBeats (clipStart + start - offset),
-                                 te::BeatDuration::fromBeats (length), note[IDs::velocity], 0, nullptr);
+                    notes.push_back ({ clipStart + start - offset, juce::jmin ((double) note[IDs::length], clipLength - rel),
+                                       (int) note[IDs::key], (int) note[IDs::velocity] });
                 }
             };
 
@@ -1488,6 +1730,21 @@ private:
             {
                 addNotes (pattern, 0.0, endBeats, 0.0);
             }
+
+            if (arpMode != Arp::off)
+            {
+                notes = Arp::apply (notes, arpMode, (double) channel.getProperty (IDs::arpRate, 1.0) * stepBeats,
+                                    channel.getProperty (IDs::arpOctaves, 1), (double) channel.getProperty (IDs::arpGate, 90.0) / 100.0, channelId);
+                for (auto& n : notes)
+                {
+                    const double stepIndex = n.start / stepBeats;
+                    if (std::abs (stepIndex - std::round (stepIndex)) < 1.0e-4 && ((juce::int64) std::round (stepIndex)) % 2 == 1)
+                        n.start += swingShift;
+                }
+            }
+
+            for (auto& n : notes)
+                seq.addNote (n.key, te::BeatPosition::fromBeats (n.start), te::BeatDuration::fromBeats (n.length), n.velocity, 0, nullptr);
 
             if (channel[IDs::type].toString() == ChannelType::audio)
                 syncAudioClips (*track, channelId, song);
@@ -1520,7 +1777,13 @@ private:
     }
 
     // Any undoable action (knob moves, mutes...) also counts as an unsaved change.
-    void changeListenerCallback (juce::ChangeBroadcaster*) override { dirty = true; }
+    // A time signature change (or its undo) lives in the engine, so regenerate for it here.
+    void changeListenerCallback (juce::ChangeBroadcaster*) override
+    {
+        dirty = true;
+        if (! juce::approximatelyEqual (getBarBeats(), regeneratedBarBeats))
+            markChanged();
+    }
 
     void valueTreePropertyChanged (juce::ValueTree&, const juce::Identifier&) override { markChanged(); }
     void valueTreeChildAdded (juce::ValueTree&, juce::ValueTree&) override                { markChanged(); }
@@ -1563,6 +1826,6 @@ private:
     int changeCount = 0, editGeneration = 0;
     bool dirty = false;
     juce::File projectFile;
-    double loopEndBeats = 4.0;
+    double loopEndBeats = 4.0, regeneratedBarBeats = 4.0;
     const te::MPESourceID liveSourceId = te::createUniqueMPESourceID();
 };

@@ -96,7 +96,7 @@ Every feature, every phase:
 ## Phase 3 — Transport & step sequencer (FL Channel Rack)
 > Built directly on Tracktion Engine (switch moved here from Phase 4 to avoid a rewrite).
 - [x] Transport: play, stop, BPM, song position display
-- [ ] Time signature editing UI (engine supports it; no UI yet)
+- [x] Time signature editing UI — "4/4" button next to the tempo: 2/4 … 12/4 (quarter-note bars only; x/8 would make Tracktion beats eighth notes, see 14f)
 - [x] Sample-accurate clock (timing from sample count, not timers)
 - [x] Channel rack UI: rows = channels, 16 step buttons each
 - [x] Load drum samples (kick, snare, hat) per channel
@@ -305,13 +305,15 @@ Every effect has a themed window, bypass, factory presets (main ones) and user p
 - [ ] Browser: tags, search, favorites, auto BPM/key detection, preview in tempo
 
 ### 14f — Pro features
-- [ ] Audio editor (≈ Edison): cut, fade, normalize, reverse, noise removal
-- [ ] Time-stretch + pitch-shift audio clips (Rubber Band or Signalsmith Stretch)
-- [ ] Preset browser + tags + search (shared by all plugins)
-- [ ] Tempo + time-signature changes over the song
+- [x] Audio editor (≈ Edison): our "Audio editor" window — waveform, drag-select, Ctrl+wheel zoom, play selection, cut/copy/paste/delete/trim, silence, fade in/out, normalize (-0.3 dB), reverse, ±3 dB, undo/redo (20 buffer snapshots). Opened from playlist audio clip title-bar right-click, sampler/instrument "Edit sample...", browser right-click. Apply writes ~/Music/untitledstudio/Edits/"<name> (edit N).wav" and repoints the channel (one undo step); originals never touched. Not done: noise removal
+- [x] Time-stretch + pitch-shift audio clips — per clip "Stretch to tempo", "Pitch..." (±24 st), "Set original BPM..." (clip title-bar right-click). Tracktion auto-tempo + SoundTouch, stretched in real time (no proxy files). Files named "... 120 BPM" stretch automatically when dropped (FL loop behaviour)
+- [x] Preset browser + search — browser "Presets" root (factory + user presets per synth/effect), search box filters sounds (recursive), presets, plugins; double-click loads on the selected channel's instrument or selected insert's matching effect, else a hint. Not done: tags
+- [x] Tempo + time-signature changes over the song — tempo markers in the playlist ruler (right-click: add / edit / remove), stored in the model (STUDIO/TEMPOS) and synced to the tempo sequence as jumps; clips keep their beat positions. Time signature is project-wide (no mid-song signature changes); toolbar tempo shows the start tempo
 - [ ] Performance / live mode (clip launching)
 - [x] Project templates (trap, house, lo-fi…) — FILE > New from template: Empty, Basic beat (default), Trap 140, House 124, Lo-fi 85 + swing; "Save as template..." → ~/Music/untitledstudio/Templates
 - [ ] Arpeggiator + chord generator (MIDI effects)
+  - [x] Arpeggiator: per channel (ARP row in channel windows, channel rack right-click > Arpeggiator): off/up/down/up-down/random, 1/32…1/4, 1–4 octaves, gate. Applied when notes are generated, so it renders/exports. Live typing-keyboard arp not done
+  - [ ] Chord generator
 
 **Done when:** make a full song using ONLY built-in instruments, sounds & effects — no 3rd-party plugins.
 

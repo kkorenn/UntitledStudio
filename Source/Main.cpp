@@ -16,6 +16,7 @@ using namespace std::literals;
 #include "Mixer.h"
 #include "PluginWindow.h"
 #include "Exporter.h"
+#include "AudioEditor.h"
 
 //==============================================================================
 // FL "typing keyboard to piano": Z-row = lower octave, Q-row = upper octave.
@@ -151,6 +152,10 @@ public:
         tempo.onChange = [this] (double bpm) { studio.setBpm (bpm); };
         addAndMakeVisible (tempo);
 
+        timeSigButton.setTooltip ("Time signature (click to change)");
+        timeSigButton.onClick = [this] { showTimeSigMenu(); };
+        addAndMakeVisible (timeSigButton);
+
         metronome.setTooltip ("Metronome");
         metronome.onClick = [this] { studio.setMetronome (metronome.getToggleState()); };
         addAndMakeVisible (metronome);
@@ -181,6 +186,11 @@ public:
 
         browser.onOpenProject = [this] (const juce::File& f) { maybeSave ([this, f] { openFile (f); }); };
         browser.onPluginChosen = [this] (const juce::PluginDescription& d) { addPlugin (d); };
+        browser.onEditAudio = [this] (const juce::File& f)
+        {
+            openAudioEditor (f, [this] (const juce::File& edited) { flashHint ("Saved the edit as " + edited.getFullPathName()); });
+        };
+        browser.onPresetChosen = [this] (const Browser::PresetEntry& p) { applyBrowserPreset (p); };
         studio.engine.getPluginManager().knownPluginList.addChangeListener (this);
 
         // FL: creating an automation clip shows it in the playlist and switches to song mode.
@@ -197,6 +207,7 @@ public:
         auto list = std::make_unique<Playlist> (studio);
         playlist = list.get();
         list->onShowChannelRack = [this] { channelRackPanel->show(); };
+        list->onEditAudio = [this] (int channelId) { editChannelAudio (channelId); };
         playlistPanel = std::make_unique<Panel> ("Playlist - Arrangement", std::move (list));
         workspace.addAndMakeVisible (*playlistPanel);
         playlistPanel->setBounds (10, 10, 1100, 700);
@@ -222,7 +233,7 @@ public:
         mixerPanel->setBounds (60, 260, 1040, 420);
 
         // Windows holding plugin pointers close before a project is replaced.
-        studio.editAboutToChange.push_back ([this] { channelPanels.clear(); effectPanels.clear(); });
+        studio.editAboutToChange.push_back ([this] { channelPanels.clear(); effectPanels.clear(); editorPanels.clear(); });
 
         auto roll = std::make_unique<PianoRoll> (studio);
         pianoRoll = roll.get();
@@ -310,6 +321,8 @@ public:
         recordButton.setBounds (bar.removeFromLeft (34));
         bar.removeFromLeft (10);
         tempo.setBounds (bar.removeFromLeft (84));
+        bar.removeFromLeft (4);
+        timeSigButton.setBounds (bar.removeFromLeft (40));
         bar.removeFromLeft (8);
         timeArea = bar.removeFromLeft (100);
         bar.removeFromLeft (8);
@@ -365,7 +378,13 @@ public:
         return TypingKeyboard::noteForKey (key.getKeyCode()) >= 0 && ! mods.isCommandDown() && ! mods.isCtrlDown();
     }
 
-    bool keyStateChanged (bool) override { return typing.update(); }
+    bool keyStateChanged (bool) override
+    {
+        // Typing in a text box (browser search, number entry) isn't playing notes.
+        if (dynamic_cast<juce::TextEditor*> (juce::Component::getCurrentlyFocusedComponent()) != nullptr)
+            return false;
+        return typing.update();
+    }
     void focusLost (FocusChangeType) override { typing.releaseAll(); }
 
     //==========================================================================
@@ -634,12 +653,76 @@ private:
         }
 
         auto content = std::make_unique<ChannelSettings> (studio, channelId);
+        content->onEditSample = [this] (int id) { editChannelAudio (id); };
         const auto size = content->getBounds();
         auto* panel = channelPanels.add (new Panel (studio.getChannel (channelId)[IDs::name].toString(), std::move (content)));
         workspace.addAndMakeVisible (panel);
         panel->setBounds (320 + 24 * (channelPanels.size() % 6), 120 + 24 * (channelPanels.size() % 6),
                           size.getWidth() + 2, size.getHeight() + Panel::titleHeight + 1);
         panel->toFront (false);
+    }
+
+    // Audio editor window on a file; `onApply` gets the edited copy.
+    void openAudioEditor (const juce::File& file, std::function<void (const juce::File&)> onApply)
+    {
+        if (! file.existsAsFile())
+            return;
+        auto content = std::make_unique<AudioEditor> (studio.engine.getAudioFileFormatManager().readFormatManager, file);
+        content->onPreview = [this] (const juce::File& f) { browser.previewFile (f); };
+        content->onApply = std::move (onApply);
+        const auto size = content->getBounds();
+        auto* panel = editorPanels.add (new Panel ("Audio editor - " + file.getFileName(), std::move (content)));
+        workspace.addAndMakeVisible (panel);
+        panel->setBounds (200 + 24 * (editorPanels.size() % 6), 140 + 24 * (editorPanels.size() % 6),
+                          size.getWidth() + 2, size.getHeight() + Panel::titleHeight + 1);
+        panel->toFront (false);
+    }
+
+    // Playlist audio clip, sampler or single-sample instrument: edit, then repoint the channel.
+    void editChannelAudio (int channelId)
+    {
+        const juce::File file (studio.getChannel (channelId)[IDs::file].toString());
+        openAudioEditor (file, [this, channelId] (const juce::File& edited)
+        {
+            if (studio.replaceAudioFile (channelId, edited))
+                flashHint ("Using the edited audio: " + edited.getFileName() + " (Ctrl+Z goes back to the original)");
+        });
+    }
+
+    // Browser preset: load it on the selected channel's instrument or the selected insert's effect.
+    void applyBrowserPreset (const Browser::PresetEntry& p)
+    {
+        auto load = [this, &p] (te::Plugin& plugin, const juce::String& where)
+        {
+            studio.undo().beginNewTransaction ("Preset");
+            if (p.userFile.existsAsFile()) Presets::loadUser (plugin, p.userFile);
+            else if (p.factory != nullptr) Presets::apply (plugin, *p.factory);
+            flashHint ("Loaded preset '" + p.name + "' on " + where);
+        };
+
+        if (auto inst = studio.getInstrument (studio.getSelectedChannel()); inst != nullptr && inst->getPluginType() == p.pluginType)
+            return load (*inst, studio.getChannel (studio.getSelectedChannel())[IDs::name].toString());
+
+        if (auto* m = dynamic_cast<Mixer*> (&mixerPanel->getContent()))
+            for (auto fx : studio.getInsertEffects (m->getSelectedInsert()))
+                if (fx->getPluginType() == p.pluginType)
+                    return load (*fx, studio.getInsertName (m->getSelectedInsert()));
+
+        flashHint ("'" + p.name + "' is a " + p.group + " preset: select a channel or mixer insert that uses " + p.group);
+    }
+
+    void flashHint (const juce::String& text)
+    {
+        flashText = text;
+        flashUntil = juce::Time::getMillisecondCounter() + 5000;
+    }
+
+    void showTimeSigMenu()
+    {
+        juce::PopupMenu m;
+        for (int n = 2; n <= 12; ++n)
+            m.addItem (juce::String (n) + "/4", true, n == studio.getTimeSigNumerator(), [this, n] { studio.setTimeSigNumerator (n); });
+        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (timeSigButton));
     }
 
     bool isFrontPanel (const Panel& p) const
@@ -756,6 +839,8 @@ private:
                     break;
             }
         }
+        if (juce::Time::getMillisecondCounter() < flashUntil)
+            newHint = flashText;
 
         const double beats = studio.getPositionBeats();
         const double barBeats = studio.getBarBeats();
@@ -792,6 +877,9 @@ private:
         }
 
         tempo.setValue (studio.getBpm());
+        const auto sig = juce::String (studio.getTimeSigNumerator()) + "/4";
+        if (timeSigButton.getButtonText() != sig)
+            timeSigButton.setButtonText (sig);
         playButton.setToggleState (studio.isPlaying(), juce::dontSendNotification);
         recordButton.setToggleState (studio.recordArmed || studio.isRecording(), juce::dontSendNotification);
         metronome.setToggleState (studio.isMetronomeOn(), juce::dontSendNotification);
@@ -874,6 +962,18 @@ private:
 
 public:
     void requestQuit() { quitRequested(); }
+    void debugOpenAudioEditor()
+    {
+        studio.setSongMode (true);
+        auto clip = studio.addAudioClip (DrumKit::getPacksFolder().getChildFile ("Loops/Drum Loop 120 BPM.wav"), 0, 0.0);
+        studio.addTempoChange (16.0, 90.0);
+        playlistPanel->show();
+        channelRackPanel->setVisible (false);
+        if (clip.isValid())
+            editChannelAudio (clip[IDs::channel]);
+        if (! editorPanels.isEmpty())
+            editorPanels.getLast()->setTopLeftPosition (100, 330);
+    }
     void debugOpenFirstChannel() { toggleChannelWindow (studio.getChannels().getChild (0)[IDs::id]); }
     void debugOpenDrumPad()      { toggleChannelWindow (studio.addDrumPadChannel()); }
     void debugTemplate (const juce::String& name) { studio.newProjectFromTemplate (name); }
@@ -951,8 +1051,12 @@ private:
     PianoRoll* pianoRoll = nullptr;
     juce::OwnedArray<Panel> channelPanels;
 
+    juce::OwnedArray<Panel> editorPanels;
+    juce::TextButton timeSigButton { "4/4" };
+
     juce::Rectangle<int> hintArea, timeArea, cpuArea;
-    juce::String hint, timeText;
+    juce::String hint, timeText, flashText;
+    juce::uint32 flashUntil = 0;
     double cpu = 0.0;
 };
 
@@ -1512,6 +1616,199 @@ namespace SelfTest
             fmChannel = s.addPresetChannel ("FM Bell");
         }
 
+        {
+            // Phase 14f: audio editor, stretch + pitch, time signature, tempo changes, arpeggiator, browser search.
+            using AudioEdit::Buffer;
+            const auto tmp = juce::File::createTempFile ("pro");
+            tmp.createDirectory();
+            auto& formats = engine.getAudioFileFormatManager().readFormatManager;
+
+            Buffer ramp (2, 44100);
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < ramp.getNumSamples(); ++i)
+                    ramp.setSample (ch, i, 0.5f * (float) i / (float) ramp.getNumSamples());
+            const AudioEdit::Range all (0, ramp.getNumSamples());
+
+            auto rev = ramp;
+            AudioEdit::reverse (rev, all);
+            ok &= check (rev.getSample (0, 0) > 0.49f && rev.getSample (1, rev.getNumSamples() - 1) < 1.0e-4f, "audio editor: reverse");
+            auto norm = ramp;
+            AudioEdit::normalise (norm, all);
+            ok &= check (std::abs (juce::Decibels::gainToDecibels (norm.getMagnitude (0, norm.getNumSamples())) + 0.3f) < 0.01f, "audio editor: normalize peaks at -0.3 dB");
+            Buffer ones (2, 1000);
+            for (int ch = 0; ch < 2; ++ch)
+                juce::FloatVectorOperations::fill (ones.getWritePointer (ch), 1.0f, 1000);
+            AudioEdit::fadeIn (ones, { 0, 1000 });
+            ok &= check (std::abs (ones.getSample (0, 0)) < 1.0e-6f && ones.getSample (1, 999) > 0.99f, "audio editor: fade in starts at 0");
+            auto cut = ramp;
+            const auto clipboard = AudioEdit::copy (cut, { 1000, 11000 });
+            AudioEdit::remove (cut, { 1000, 11000 });
+            ok &= check (cut.getNumSamples() == 34100 && juce::approximatelyEqual (cut.getSample (0, 1000), ramp.getSample (0, 11000)), "audio editor: cut shortens the sound");
+            AudioEdit::insert (cut, 1000, clipboard);
+            ok &= check (cut.getNumSamples() == 44100 && juce::approximatelyEqual (cut.getSample (1, 5000), ramp.getSample (1, 5000)), "audio editor: paste puts it back");
+            auto trimmed = ramp;
+            AudioEdit::trim (trimmed, { 100, 600 });
+            ok &= check (trimmed.getNumSamples() == 500 && juce::approximatelyEqual (trimmed.getSample (0, 0), ramp.getSample (0, 100)), "audio editor: trim to selection");
+            auto loud = ramp;
+            AudioEdit::gain (loud, all, 6.0206f);
+            ok &= check (std::abs (loud.getMagnitude (0, loud.getNumSamples()) - 2.0f * ramp.getMagnitude (0, ramp.getNumSamples())) < 1.0e-3f, "audio editor: gain");
+
+            Studio st (engine);
+            st.newProjectFromTemplate ("Empty");
+            st.setSongMode (true);
+            const auto loop = DrumKit::getPacksFolder().getChildFile ("Loops/Drum Loop 120 BPM.wav");
+            st.undo().beginNewTransaction();
+            auto loopClip = st.addAudioClip (loop, 0, 0.0);
+            const int loopChannel = loopClip[IDs::channel];
+            auto waveClip = [&st] (int channel) -> te::WaveAudioClip*
+            {
+                st.regenerateNow();
+                for (auto c : st.getTrack (channel)->getClips())
+                    if (auto w = dynamic_cast<te::WaveAudioClip*> (c))
+                        return w;
+                return nullptr;
+            };
+
+            Buffer loopAudio;
+            double loopRate = 0.0;
+            ok &= check (AudioEdit::read (formats, loop, loopAudio, loopRate), "audio editor: reads the loop");
+            AudioEdit::reverse (loopAudio, { 0, loopAudio.getNumSamples() });
+            const auto edited = AudioEdit::nextEditFile (loop, tmp);
+            ok &= check (AudioEdit::writeWav (loopAudio, loopRate, edited) && edited.getFileName() == "Drum Loop 120 BPM (edit 1).wav"
+                             && AudioEdit::nextEditFile (edited, tmp).getFileName() == "Drum Loop 120 BPM (edit 2).wav" && loop.existsAsFile(),
+                         "audio editor: Apply writes a new numbered file, original kept");
+            st.undo().beginNewTransaction();
+            st.replaceAudioFile (loopChannel, edited);
+            ok &= check (waveClip (loopChannel) != nullptr && waveClip (loopChannel)->getOriginalFile() == edited, "audio editor: Apply repoints the playlist clip");
+            st.undo().undo();
+            ok &= check (waveClip (loopChannel)->getOriginalFile() == loop, "audio editor: undo goes back to the original file");
+
+            // Stretch + pitch: a 120 BPM loop (4 s = 8 beats) at 140 BPM.
+            ok &= check (juce::approximatelyEqual (Studio::bpmFromFileName ("Drum Loop 120 BPM"), 120.0) && juce::approximatelyEqual (Studio::bpmFromFileName ("loop_92bpm"), 92.0)
+                             && juce::approximatelyEqual (Studio::bpmFromFileName ("Kick"), 0.0), "BPM read from file names");
+            st.setBpm (140.0);
+            st.setClipPitch (loopClip, 3.0);
+            if (auto w = waveClip (loopChannel))
+            {
+                ok &= check ((bool) loopClip[IDs::stretch] && std::abs ((double) loopClip[IDs::length] - 8.0) < 1.0e-3, "dropped loop stretches to tempo, 8 beats long");
+                ok &= check (w->getAutoTempo() && std::abs (w->getLoopInfo().getBpm (w->getWaveInfo()) - 120.0) < 0.01
+                                 && std::abs (w->getPosition().getLength().inSeconds() - 8.0 * 60.0 / 140.0) < 1.0e-3,
+                             "engine clip follows tempo (auto-tempo, 120 BPM source, " + juce::String (w->getPosition().getLength().inSeconds(), 3) + " s at 140)");
+                ok &= check (std::abs (w->getPitchChange() - 3.0f) < 1.0e-4f && w->getTimeStretchMode() == te::TimeStretcher::soundtouchBetter, "clip pitch +3 st applied");
+            }
+            {
+                Exporter::Settings es;
+                es.tailSeconds = 0.0;
+                const auto wav = tmp.getChildFile ("stretch.wav");
+                Exporter::exportMix (st, es, wav);
+                std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (wav));
+                juce::AudioBuffer<float> mix (2, reader != nullptr ? (int) reader->lengthInSamples : 0);
+                if (reader != nullptr)
+                    reader->read (&mix, 0, mix.getNumSamples(), 0, true, true);
+                ok &= check (mix.getNumSamples() > 0 && mix.getMagnitude (0, mix.getNumSamples()) > 0.05f
+                                 && std::abs (mix.getNumSamples() / reader->sampleRate - 8.0 * 60.0 / 140.0) < 0.05,
+                             "stretched + pitched loop renders offline at the project tempo");
+            }
+            st.undo().beginNewTransaction();
+            st.setClipStretch (loopClip, false);
+            ok &= check (! waveClip (loopChannel)->getAutoTempo() && std::abs ((double) loopClip[IDs::length] - 8.0 * 140.0 / 120.0) < 1.0e-3,
+                         "stretch off: plays at its own speed, clip length follows");
+            st.undo().undo();
+
+            // Time signature
+            const int synth = st.addSynthChannel();
+            st.setTimeSigNumerator (3);
+            auto pattern = st.getCurrentPatternState();
+            st.addNote (pattern, synth, 3.5, 0.5, 60, 100);
+            ok &= check (juce::approximatelyEqual (st.getBarBeats(), 3.0) && std::abs (st.getPatternLengthBeats (pattern) - 6.0) < 1.0e-6, "3/4: 3-beat bars, pattern rounds to 6 beats");
+            st.undo().undo();
+            ok &= check (juce::approximatelyEqual (st.getBarBeats(), 4.0), "undo restores 4/4");
+            pattern.removeAllChildren (nullptr);
+
+            // Tempo change at bar 5: 8 bars of pattern at 120, then 60 from beat 16.
+            st.setBpm (120.0);
+            st.getPlaylist().removeAllChildren (nullptr);
+            st.addNote (pattern, synth, 0.0, 1.0, 60, 100);
+            for (int bar = 0; bar < 8; ++bar)
+                st.addPatternClip (pattern[IDs::id], 1, bar * 4.0);
+            auto hit = st.addAudioClip (DrumKit::getDrumsFolder().getChildFile ("Kick.wav"), 2, 20.0);
+            auto mixLength = [&]
+            {
+                Exporter::Settings es;
+                es.tailSeconds = 0.0;
+                const auto wav = tmp.getChildFile ("tempo.wav");
+                Exporter::exportMix (st, es, wav);
+                std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (wav));
+                return reader != nullptr ? (double) reader->lengthInSamples / reader->sampleRate : -1.0;
+            };
+            const double before = mixLength();
+            const double hitBefore = waveClip (hit[IDs::channel])->getPosition().getStart().inSeconds();
+            st.addTempoChange (16.0, 60.0);
+            const double after = mixLength();
+            const double hitAfter = waveClip (hit[IDs::channel])->getPosition().getStart().inSeconds();
+            ok &= check (std::abs (before - 16.0) < 0.05 && std::abs (after - 24.0) < 0.05,
+                         "tempo change at bar 5 (120 -> 60): mixdown " + juce::String (before, 2) + " s -> " + juce::String (after, 2) + " s");
+            ok &= check (juce::approximatelyEqual ((double) hit[IDs::start], 20.0) && std::abs (hitBefore - 10.0) < 1.0e-3 && std::abs (hitAfter - 12.0) < 1.0e-3,
+                         "clip stays at beat 20, its time moves 10 s -> 12 s");
+            st.undo().beginNewTransaction();
+            st.removeTempoChange (st.getTempoChanges().getChild (0));
+            st.regenerateNow();
+            ok &= check (st.getEdit().tempoSequence.getNumTempos() == 1 && std::abs (waveClip (hit[IDs::channel])->getPosition().getStart().inSeconds() - 10.0) < 1.0e-3,
+                         "removing the tempo change restores timing");
+
+            // Arpeggiator: a held 1-bar C-E-G chord.
+            st.setSongMode (false);
+            st.getPlaylist().removeAllChildren (nullptr);
+            pattern.removeAllChildren (nullptr);
+            for (int key : { 60, 64, 67 })
+                st.addNote (pattern, synth, 0.0, 4.0, key, 100);
+            auto channel = st.getChannel (synth);
+            auto arpNotes = [&]
+            {
+                st.regenerateNow();
+                juce::Array<int> keys;
+                for (auto c : st.getTrack (synth)->getClips())
+                    if (auto mc = dynamic_cast<te::MidiClip*> (c))
+                        for (auto n : mc->getSequence().getNotes())
+                            keys.add (n->getNoteNumber());
+                return keys;
+            };
+            ok &= check (arpNotes().size() == 3, "arp off: the chord plays as 3 notes");
+            channel.setProperty (IDs::arp, Arp::up, nullptr);
+            channel.setProperty (IDs::arpOctaves, 2, nullptr);
+            auto up = arpNotes();
+            ok &= check (up.size() == 16 && up[0] == 60 && up[2] == 67 && up[3] == 72 && up[5] == 79 && up[6] == 60, "arp up, 1/16, 2 octaves: 16 notes 60 64 67 72 76 79 60...");
+            channel.setProperty (IDs::arp, Arp::upDown, nullptr);
+            channel.setProperty (IDs::arpOctaves, 1, nullptr);
+            channel.setProperty (IDs::arpRate, 2.0, nullptr);
+            auto upDown = arpNotes();
+            ok &= check (upDown.size() == 8 && upDown[2] == 67 && upDown[3] == 64 && upDown[4] == 60, "arp up-down, 1/8: 8 notes 60 64 67 64 60...");
+            channel.setProperty (IDs::arp, Arp::down, nullptr);
+            ok &= check (arpNotes()[0] == 67, "arp down starts on the top note");
+
+            // Browser search (the filtering, not the UI).
+            const auto sounds = tmp.getChildFile ("sounds");
+            for (auto name : { "Kicks/Big Kick.wav", "Snare Tight.wav", "Kick notes.txt" })
+            {
+                sounds.getChildFile (name).getParentDirectory().createDirectory();
+                sounds.getChildFile (name).replaceWithText ("x");
+            }
+            const auto found = Browser::searchFiles ({ sounds }, "kick", "*.wav;*.aif");
+            ok &= check (found.size() == 1 && found[0].getFileName() == "Big Kick.wav", "browser search finds sounds in subfolders (not other files)");
+            ok &= check (Browser::matchesSearch ("Drum Loop 120 BPM", "loop 120") && ! Browser::matchesSearch ("Drum Loop 120 BPM", "loop 90"), "browser search matches every word");
+            int bassPresets = 0;
+            bool acid = false, eq = false;
+            for (auto& p : Browser::allPresets())
+                if (Browser::matchesSearch (p.name, "bass"))
+                {
+                    ++bassPresets;
+                    acid |= p.name == "Acid Bass" && p.pluginType == te::FourOscPlugin::xmlTypeName && p.factory != nullptr;
+                    eq |= p.name == "Bass boost" && p.pluginType == te::EqualiserPlugin::xmlTypeName;
+                }
+            ok &= check (acid && eq, "browser presets: 'bass' finds synth and effect presets (" + juce::String (bassPresets) + ")");
+            tmp.deleteRecursively();
+        }
+
         const auto file = juce::File::createTempFile (Studio::fileExtension);
         s.setSongMode (false);
         const int savedChannels = s.getChannels().getNumChildren();
@@ -1634,6 +1931,10 @@ public:
             if (commandLine.contains ("--open-instrument"))
                 if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
                     mc->debugOpenInstrument();
+
+            if (commandLine.contains ("--open-audio-editor"))
+                if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
+                    mc->debugOpenAudioEditor();
 
             if (commandLine.contains ("--open-channel"))
                 if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))

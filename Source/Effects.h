@@ -189,11 +189,12 @@ namespace Presets
         return it != all.end() ? it->second : none;
     }
 
-    inline juce::File folderFor (te::Plugin& p)
+    inline juce::File getUserFolder()
     {
-        return juce::File::getSpecialLocation (juce::File::userMusicDirectory)
-                   .getChildFile ("untitledstudio").getChildFile ("Presets").getChildFile (p.getPluginType());
+        return juce::File::getSpecialLocation (juce::File::userMusicDirectory).getChildFile ("untitledstudio").getChildFile ("Presets");
     }
+
+    inline juce::File folderFor (te::Plugin& p) { return getUserFolder().getChildFile (p.getPluginType()); }
 
     inline void saveUser (te::Plugin& p, const juce::String& name)
     {

@@ -253,6 +253,17 @@ private:
             m.addItem ("Rename...", [this] { rename(); });
             if (channel[IDs::type].toString() == ChannelType::sampler)
                 m.addItem ("Replace sample...", [this] { if (rack.onOpenChannel) rack.onOpenChannel (channelId); });
+            if (channel[IDs::type].toString() != ChannelType::audio)
+            {
+                juce::PopupMenu arp;
+                for (int i = 0; i < Arp::modeNames().size(); ++i)
+                    arp.addItem (Arp::modeNames()[i], true, (int) channel[IDs::arp] == i, [&s = studio, id = channelId, i]
+                    {
+                        s.undo().beginNewTransaction ("Arpeggiator");
+                        s.getChannel (id).setProperty (IDs::arp, i, &s.undo());
+                    });
+                m.addSubMenu ("Arpeggiator", arp);
+            }
             m.addSeparator();
             m.addItem ("Delete", studio.getChannels().getNumChildren() > 1,
                        false, [&s = studio, id = channelId] { s.deleteChannel (id); });
