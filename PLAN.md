@@ -94,20 +94,22 @@ Every feature, every phase:
 **Done when:** you can play chords on a MIDI keyboard with no clicks, pops or stuck notes.
 
 ## Phase 3 — Transport & step sequencer (FL Channel Rack)
-- [ ] Transport: play, stop, BPM, time signature, song position display
-- [ ] Sample-accurate clock (timing from sample count, not timers)
-- [ ] Channel rack UI: rows = channels, 16 step buttons each
-- [ ] Load drum samples (kick, snare, hat) per channel
-- [ ] Per-channel volume, pan, mute, solo
-- [ ] Swing
-- [ ] Metronome
+> Built directly on Tracktion Engine (switch moved here from Phase 4 to avoid a rewrite).
+- [x] Transport: play, stop, BPM, song position display
+- [ ] Time signature editing UI (engine supports it; no UI yet)
+- [x] Sample-accurate clock (timing from sample count, not timers)
+- [x] Channel rack UI: rows = channels, 16 step buttons each
+- [x] Load drum samples (kick, snare, hat) per channel
+- [x] Per-channel volume, pan, mute, solo
+- [x] Swing
+- [x] Metronome
 
 **Done when:** 4-channel drum loop at 140 BPM runs 10 minutes with perfect timing (no drift).
 
 ## Phase 4 — Move to Tracktion Engine + project model
 > The big switch. Tracktion gives you timeline, clips, tracks, plugin hosting, undo, save/load.
-- [ ] Add Tracktion Engine as submodule (`libs/tracktion_engine`)
-- [ ] Rebuild Phases 1–3 features on top of `tracktion::Edit`
+- [x] Add Tracktion Engine as submodule (`libs/tracktion_engine`)
+- [x] Rebuild Phases 1–3 features on top of `tracktion::Edit` (Phase 2 synth replaced by Tracktion's 4-OSC)
 - [ ] Project save / load (`.untitled` file)
 - [ ] **Undo / redo from day one** (`UndoManager`) — very hard to add later
 - [ ] Autosave every N minutes + crash recovery

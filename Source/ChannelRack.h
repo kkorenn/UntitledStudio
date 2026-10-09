@@ -1,0 +1,366 @@
+#pragma once
+
+#include "Studio.h"
+#include "Widgets.h"
+
+// FL's Channel Rack: one row per channel with mute LED, pan, volume, name and step buttons.
+class ChannelRack : public juce::Component, private juce::Timer
+{
+public:
+    std::function<void (int channelId)> onOpenChannel;
+
+    explicit ChannelRack (Studio& s) : studio (s)
+    {
+        Widgets::setupKnob (swingKnob, "Swing: delays every 2nd step for a shuffled groove");
+        swingKnob.setRange (0.0, 1.0);
+        swingKnob.onDragStart = [this] { studio.undo().beginNewTransaction ("Swing"); };
+        swingKnob.onValueChange = [this] { studio.setSwing (swingKnob.getValue()); };
+        addAndMakeVisible (swingKnob);
+
+        addButton.setTooltip ("Add a channel (sampler or synth)");
+        addButton.onClick = [this] { showAddMenu(); };
+        addAndMakeVisible (addButton);
+
+        viewport.setViewedComponent (&rowHolder, false);
+        viewport.setScrollBarsShown (true, true);
+        addAndMakeVisible (viewport);
+
+        Widgets::noFocus (*this);
+        rebuildRows();
+        startTimerHz (30);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.fillAll (Theme::panelDark);
+        auto header = getLocalBounds().removeFromTop (headerHeight);
+        g.setColour (Theme::panel);
+        g.fillRect (header);
+        g.setColour (Theme::textDim);
+        g.setFont (Theme::font (12.0f));
+        g.drawText ("SWING", header.withX (8).withWidth (44), juce::Justification::centredLeft);
+
+        const auto pattern = studio.getCurrentPatternState();
+        g.setColour (Theme::text);
+        g.drawText (pattern[IDs::name].toString(), header.withTrimmedLeft (90).reduced (6, 0), juce::Justification::centredLeft);
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds();
+        auto header = r.removeFromTop (headerHeight);
+        swingKnob.setBounds (header.withX (52).withWidth (headerHeight).reduced (2));
+
+        auto footer = r.removeFromBottom (footerHeight);
+        addButton.setBounds (footer.reduced (6, 4).withWidth (ChannelRow::nameRight - 6));
+        viewport.setBounds (r);
+        layoutRows();
+    }
+
+private:
+    //==========================================================================
+    class ChannelRow : public juce::Component
+    {
+    public:
+        static constexpr int stepsLeft = 196, stepWidth = 20, nameRight = 190;
+
+        ChannelRow (ChannelRack& r, int id) : rack (r), studio (r.studio), channelId (id)
+        {
+            mute.onClick = [this]
+            {
+                if (auto t = track()) t->setMute (! mute.getToggleState());
+            };
+            mute.onRightClick = [this] { toggleSolo(); };
+            addAndMakeVisible (mute);
+
+            Widgets::setupKnob (pan, "Channel panning", true);
+            Widgets::setupKnob (volume, "Channel volume");
+            if (auto t = track())
+            {
+                if (auto vp = t->getVolumePlugin())
+                {
+                    bindKnob (pan, vp->panParam);
+                    bindKnob (volume, vp->volParam);
+                }
+            }
+            addAndMakeVisible (pan);
+            addAndMakeVisible (volume);
+
+            name.setTooltip ("Left-click: open channel. Right-click: options");
+            name.onClick = [this] { studio.selectChannel (channelId); if (rack.onOpenChannel) rack.onOpenChannel (channelId); };
+            name.onRightClick = [this] { showMenu(); };
+            addAndMakeVisible (name);
+
+            select.setClickingTogglesState (false);
+            select.onClick = [this] { studio.selectChannel (channelId); };
+            addAndMakeVisible (select);
+            sync();
+        }
+
+        int getChannelId() const { return channelId; }
+
+        void sync()
+        {
+            auto channel = studio.getChannel (channelId);
+            name.setButtonText (channel[IDs::name].toString());
+            select.setToggleState (studio.getSelectedChannel() == channelId, juce::dontSendNotification);
+            if (auto t = track())
+                mute.setToggleState (! t->isMuted (false), juce::dontSendNotification);
+
+            for (auto* k : { &pan, &volume })
+                if (auto* p = static_cast<te::AutomatableParameter*> (k->getProperties()["param"].getObject()))
+                    if (! k->isMouseButtonDown())
+                        k->setValue (p->getCurrentValue(), juce::dontSendNotification);
+            repaint();
+        }
+
+        void paint (juce::Graphics& g) override
+        {
+            const auto pattern = studio.getCurrentPatternState();
+            const int numSteps = rack.getNumSteps();
+            const int playingStep = rack.getPlayingStep();
+
+            for (int i = 0; i < numSteps; ++i)
+            {
+                auto r = getStepBounds (i).toFloat();
+                const bool on = studio.findStepNote (pattern, channelId, i).isValid();
+                g.setColour (on ? Theme::stepOn : ((i / 4) % 2 == 0 ? Theme::stepOffA : Theme::stepOffB));
+                g.fillRoundedRectangle (r, 2.0f);
+
+                if (i == playingStep)
+                {
+                    g.setColour (Theme::accent.withAlpha (on ? 0.9f : 0.45f));
+                    g.drawRoundedRectangle (r.reduced (0.5f), 2.0f, 1.5f);
+                }
+            }
+        }
+
+        void resized() override
+        {
+            auto r = getLocalBounds().reduced (0, 4);
+            mute.setBounds (r.removeFromLeft (16).withTrimmedLeft (4).withSizeKeepingCentre (12, 12));
+            r.removeFromLeft (4);
+            pan.setBounds (r.removeFromLeft (24));
+            volume.setBounds (r.removeFromLeft (24));
+            r.removeFromLeft (6);
+            name.setBounds (r.withRight (nameRight));
+            select.setBounds (getWidth() - 14, 7, 10, getHeight() - 14);
+        }
+
+        void mouseDown (const juce::MouseEvent& e) override
+        {
+            const int step = stepAt (e.x);
+            if (step < 0)
+                return;
+
+            studio.undo().beginNewTransaction ("Steps");
+            const auto pattern = studio.getCurrentPatternState();
+            // FL: left-click toggles + paints, right-click erases.
+            paintValue = e.mods.isPopupMenu() ? false : ! studio.findStepNote (pattern, channelId, step).isValid();
+            studio.setStep (channelId, step, paintValue);
+            lastStep = step;
+        }
+
+        void mouseDrag (const juce::MouseEvent& e) override
+        {
+            const int step = stepAt (e.x);
+            if (step >= 0 && step != lastStep)
+            {
+                studio.setStep (channelId, step, paintValue);
+                lastStep = step;
+            }
+        }
+
+    private:
+        te::AudioTrack* track() const { return studio.getTrack (channelId); }
+
+        void bindKnob (juce::Slider& knob, te::AutomatableParameter::Ptr param)
+        {
+            const auto range = param->valueRange;
+            knob.setNormalisableRange ({ range.start, range.end, 0.0, range.skew });
+            knob.setValue (param->getCurrentValue(), juce::dontSendNotification);
+            if (auto def = param->getDefaultValue())
+                knob.setDoubleClickReturnValue (true, *def);
+            knob.getProperties().set ("param", param.get());
+            knob.onDragStart = [param] { param->parameterChangeGestureBegin(); };
+            knob.onDragEnd   = [param] { param->parameterChangeGestureEnd(); };
+            knob.onValueChange = [&knob, param]
+            {
+                param->setParameter ((float) knob.getValue(), juce::sendNotificationSync);
+                knob.setTooltip (param->getParameterName() + ": " + param->getCurrentValueAsStringWithLabel());
+            };
+            params.add (param);
+        }
+
+        void toggleSolo()
+        {
+            auto t = track();
+            if (t == nullptr)
+                return;
+
+            // FL: right-click the LED solos this channel; again un-solos.
+            const bool soloThis = ! t->isSolo (false);
+            for (auto channel : studio.getChannels())
+                if (auto other = studio.getTrack (channel))
+                    other->setSolo (soloThis && other == t);
+        }
+
+        void showMenu()
+        {
+            const auto channel = studio.getChannel (channelId);
+            juce::PopupMenu m;
+            m.addItem ("Rename...", [this] { rename(); });
+            if (channel[IDs::type].toString() == ChannelType::sampler)
+                m.addItem ("Replace sample...", [this] { if (rack.onOpenChannel) rack.onOpenChannel (channelId); });
+            m.addSeparator();
+            m.addItem ("Delete", studio.getChannels().getNumChildren() > 1,
+                       false, [this, &s = studio, id = channelId] { s.deleteChannel (id); });
+            m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (name));
+        }
+
+        void rename()
+        {
+            auto* w = new juce::AlertWindow ("Rename channel", {}, juce::MessageBoxIconType::NoIcon);
+            w->addTextEditor ("name", studio.getChannel (channelId)[IDs::name].toString());
+            w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+            w->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+            w->enterModalState (true, juce::ModalCallbackFunction::create ([this, w] (int result)
+            {
+                if (result == 1)
+                {
+                    studio.undo().beginNewTransaction ("Rename");
+                    studio.renameChannel (channelId, w->getTextEditorContents ("name"));
+                }
+            }), true);
+        }
+
+        juce::Rectangle<int> getStepBounds (int i) const
+        {
+            return { stepsLeft + i * stepWidth + 1, 4, stepWidth - 2, getHeight() - 8 };
+        }
+
+        int stepAt (int x) const
+        {
+            const int i = (x - stepsLeft) / stepWidth;
+            return (x >= stepsLeft && i < rack.getNumSteps()) ? i : -1;
+        }
+
+        ChannelRack& rack;
+        Studio& studio;
+        const int channelId;
+        Widgets::LedButton mute { "Mute (left-click) / Solo (right-click)" };
+        juce::Slider pan, volume;
+        struct NameButton : juce::TextButton
+        {
+            std::function<void()> onRightClick;
+            void mouseDown (const juce::MouseEvent& e) override
+            {
+                if (e.mods.isPopupMenu()) onRightClick();
+                else juce::TextButton::mouseDown (e);
+            }
+        } name;
+        Widgets::LedButton select { "Select channel", Theme::led };
+        juce::Array<te::AutomatableParameter::Ptr> params;
+        bool paintValue = true;
+        int lastStep = -1;
+    };
+
+    //==========================================================================
+    int getNumSteps() const
+    {
+        return juce::jmax (16, (int) std::round (studio.getPatternLengthBeats (studio.getCurrentPatternState()) / Studio::stepBeats));
+    }
+
+    int getPlayingStep() const
+    {
+        if (! studio.isPlaying() || studio.isSongMode())
+            return -1;
+        return (int) std::floor (studio.getPositionBeats() / Studio::stepBeats) % getNumSteps();
+    }
+
+    void rebuildRows()
+    {
+        rows.clear();
+        for (auto channel : studio.getChannels())
+            rowHolder.addAndMakeVisible (rows.add (new ChannelRow (*this, channel[IDs::id])));
+        Widgets::noFocus (rowHolder);
+        layoutRows();
+    }
+
+    void layoutRows()
+    {
+        const int width = juce::jmax (viewport.getMaximumVisibleWidth(),
+                                      ChannelRow::stepsLeft + getNumSteps() * ChannelRow::stepWidth + 20);
+        rowHolder.setSize (width, rows.size() * rowHeight);
+        for (int i = 0; i < rows.size(); ++i)
+            rows[i]->setBounds (0, i * rowHeight, width, rowHeight);
+    }
+
+    bool rowsMatchModel() const
+    {
+        const auto channels = studio.getChannels();
+        if (channels.getNumChildren() != rows.size())
+            return false;
+        for (int i = 0; i < rows.size(); ++i)
+            if ((int) channels.getChild (i)[IDs::id] != rows[i]->getChannelId())
+                return false;
+        return true;
+    }
+
+    void timerCallback() override
+    {
+        const int playingStep = getPlayingStep();
+        if (studio.getChangeCount() != lastChangeCount)
+        {
+            lastChangeCount = studio.getChangeCount();
+            if (! rowsMatchModel())
+                rebuildRows();
+            else
+                layoutRows();
+
+            swingKnob.setValue (studio.getSwing(), juce::dontSendNotification);
+            for (auto* row : rows)
+                row->sync();
+            repaint();
+        }
+        else if (++ticks % 6 == 0)
+        {
+            // Mute/volume can change outside the model (undo, automation): resync a few times a second.
+            for (auto* row : rows)
+                row->sync();
+        }
+        else if (playingStep != lastPlayingStep)
+        {
+            for (auto* row : rows)
+                row->repaint();
+        }
+        lastPlayingStep = playingStep;
+    }
+
+    void showAddMenu()
+    {
+        juce::PopupMenu m;
+        m.addItem ("Sampler", [this]
+        {
+            const int id = studio.addSamplerChannel (DrumKit::getDrumsFolder().getChildFile ("Kick.wav"));
+            studio.selectChannel (id);
+            if (onOpenChannel) onOpenChannel (id);
+        });
+        m.addItem ("4-OSC Synth", [this]
+        {
+            const int id = studio.addSynthChannel();
+            studio.selectChannel (id);
+        });
+        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (addButton));
+    }
+
+    static constexpr int headerHeight = 28, footerHeight = 30, rowHeight = 32;
+
+    Studio& studio;
+    juce::Slider swingKnob;
+    juce::TextButton addButton { "+" };
+    juce::Viewport viewport;
+    juce::Component rowHolder;
+    juce::OwnedArray<ChannelRow> rows;
+    int lastChangeCount = -1, lastPlayingStep = -1, ticks = 0;
+};
