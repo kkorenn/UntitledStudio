@@ -435,7 +435,7 @@ public:
                 visual = std::make_unique<EqView> (*eq);
                 height = 520;
             }
-            knobs = std::make_unique<GenericPluginEditor> (p);
+            knobs = std::make_unique<GenericPluginEditor> (s, p);
             addAndMakeVisible (*knobs);
         }
         if (visual != nullptr)

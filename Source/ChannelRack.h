@@ -2,6 +2,7 @@
 
 #include "Studio.h"
 #include "Widgets.h"
+#include "ParamKnob.h"
 
 // FL's Channel Rack: one row per channel with mute LED, pan, volume, name and step buttons.
 class ChannelRack : public juce::Component,
@@ -111,14 +112,12 @@ private:
             mute.onRightClick = [this] { toggleSolo(); };
             addAndMakeVisible (mute);
 
-            Widgets::setupKnob (pan, "Channel panning", true);
-            Widgets::setupKnob (volume, "Channel volume");
             if (auto t = track())
             {
                 if (auto vp = t->getVolumePlugin())
                 {
-                    bindKnob (pan, vp->panParam);
-                    bindKnob (volume, vp->volParam);
+                    pan.bind (studio, vp->panParam);
+                    volume.bind (studio, vp->volParam);
                 }
             }
             addAndMakeVisible (pan);
@@ -155,10 +154,8 @@ private:
             if (auto t = track())
                 mute.setToggleState (! t->isMuted (false), juce::dontSendNotification);
 
-            for (auto* k : { &pan, &volume })
-                if (auto* p = static_cast<te::AutomatableParameter*> (k->getProperties()["param"].getObject()))
-                    if (! k->isMouseButtonDown())
-                        k->setValue (p->getCurrentValue(), juce::dontSendNotification);
+            pan.sync();
+            volume.sync();
             repaint();
         }
 
@@ -234,24 +231,6 @@ private:
     private:
         te::AudioTrack* track() const { return studio.getTrack (channelId); }
 
-        void bindKnob (juce::Slider& knob, te::AutomatableParameter::Ptr param)
-        {
-            const auto range = param->valueRange;
-            knob.setNormalisableRange ({ range.start, range.end, 0.0, range.skew });
-            knob.setValue (param->getCurrentValue(), juce::dontSendNotification);
-            if (auto def = param->getDefaultValue())
-                knob.setDoubleClickReturnValue (true, *def);
-            knob.getProperties().set ("param", param.get());
-            knob.onDragStart = [this, param] { studio.undo().beginNewTransaction ("Knob"); param->parameterChangeGestureBegin(); };
-            knob.onDragEnd   = [param] { param->parameterChangeGestureEnd(); };
-            knob.onValueChange = [&knob, param]
-            {
-                param->setParameter ((float) knob.getValue(), juce::sendNotificationSync);
-                knob.setTooltip (param->getParameterName() + ": " + param->getCurrentValueAsStringWithLabel());
-            };
-            params.add (param);
-        }
-
         void toggleSolo()
         {
             auto t = track();
@@ -311,7 +290,7 @@ private:
         Studio& studio;
         const int channelId;
         Widgets::LedButton mute { "Mute (left-click) / Solo (right-click)" };
-        juce::Slider pan, volume;
+        ParamKnob pan, volume;
         Widgets::DragNumber insert { 0.0, (double) Studio::numInserts, 0.1 };
         struct NameButton : juce::TextButton
         {
@@ -323,7 +302,6 @@ private:
             }
         } name;
         Widgets::LedButton select { "Select channel", Theme::led };
-        juce::Array<te::AutomatableParameter::Ptr> params;
         bool paintValue = true;
         int lastStep = -1;
     };

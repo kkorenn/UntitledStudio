@@ -12,6 +12,8 @@ namespace te = tracktion;
 //     PATTERNS / PATTERN (id, name, colour) / NOTE (channel, start, length, key, velocity)
 //     INSERTS / INSERT  (index, name, track)  -- mixer inserts; index 0 = master
 //     PLAYLIST / PCLIP   (id, type, pattern | channel, lane, start, length, offset, muted)  -- beats
+//       type "automation": (plugin, param, name) / POINT (pos beats in clip, value 0..1, tension)
+//     MAPPINGS / MAP (cc, channel, plugin, param)  -- MIDI controller links
 //
 // Each channel = one Tracktion AudioTrack holding its instrument + one "derived" MidiClip.
 // The derived clip's notes are regenerated from the model (patterns + playlist) whenever the
@@ -26,6 +28,8 @@ namespace IDs
     STUDIO_ID (pattern) STUDIO_ID (lane) STUDIO_ID (currentPattern) STUDIO_ID (songMode) STUDIO_ID (swing)
     STUDIO_ID (derived) STUDIO_ID (nextId) STUDIO_ID (offset) STUDIO_ID (muted) STUDIO_ID (loopStart) STUDIO_ID (loopEnd)
     STUDIO_ID (clipId) STUDIO_ID (INSERTS) STUDIO_ID (INSERT) STUDIO_ID (insert) STUDIO_ID (index)
+    STUDIO_ID (POINT) STUDIO_ID (pos) STUDIO_ID (value) STUDIO_ID (tension) STUDIO_ID (plugin) STUDIO_ID (param)
+    STUDIO_ID (MAPPINGS) STUDIO_ID (MAP) STUDIO_ID (cc)
    #undef STUDIO_ID
 }
 
@@ -35,6 +39,7 @@ namespace ChannelType
     inline const juce::String synth   = "synth";
     inline const juce::String audio   = "audio";   // FL "audio clip" channel: plays playlist audio clips
     inline const juce::String plugin  = "plugin";  // third-party instrument
+    inline const juce::String automation = "automation"; // playlist automation clip type
 }
 
 class Studio : private juce::ValueTree::Listener,
@@ -562,7 +567,180 @@ public:
         return c;
     }
 
-    static bool isAudioClip (const juce::ValueTree& clip) { return clip[IDs::type].toString() == ChannelType::audio; }
+    static bool isAudioClip (const juce::ValueTree& clip)      { return clip[IDs::type].toString() == ChannelType::audio; }
+    static bool isAutomationClip (const juce::ValueTree& clip) { return clip[IDs::type].toString() == ChannelType::automation; }
+    static bool isPatternClip (const juce::ValueTree& clip)    { return ! isAudioClip (clip) && ! isAutomationClip (clip); }
+
+    //==========================================================================
+    // Automation clips (FL: right-click a knob -> "Create automation clip")
+
+    std::function<void()> onAutomationClipCreated; // UI shows the playlist
+
+    te::AutomatableParameter* findParam (const juce::var& pluginId, const juce::String& paramId) const
+    {
+        if (auto p = te::findPluginForID (*edit, te::EditItemID::fromVar (pluginId)))
+            for (auto* param : p->getAutomatableParameters())
+                if (param->paramID == paramId)
+                    return param;
+        return nullptr;
+    }
+
+    juce::String describeParam (te::AutomatableParameter& param) const
+    {
+        juce::String owner;
+        if (auto t = param.getTrack())
+            owner = t->getName();
+        else if (param.getPlugin() != nullptr)
+            owner = "Master";
+        return owner + " - " + param.getParameterName();
+    }
+
+    int findFreeLane (double start, double length) const
+    {
+        for (int lane = 0; lane < 500; ++lane)
+        {
+            bool busy = false;
+            for (auto c : getPlaylist())
+                if ((int) c[IDs::lane] == lane && (double) c[IDs::start] < start + length && (double) c[IDs::start] + (double) c[IDs::length] > start)
+                    busy = true;
+            if (! busy)
+                return lane;
+        }
+        return 0;
+    }
+
+    juce::ValueTree createAutomationClip (te::AutomatableParameter& param, double start = 0.0, double length = 0.0)
+    {
+        auto plugin = param.getPlugin();
+        if (plugin == nullptr)
+            return {};
+
+        if (length <= 0.0)
+            length = juce::jmax (getSongLengthBeats() - start, getBarBeats() * 4.0);
+
+        undo().beginNewTransaction ("Create automation clip");
+        juce::ValueTree c (IDs::PCLIP);
+        c.setProperty (IDs::id, takeNextId(), nullptr);
+        c.setProperty (IDs::type, ChannelType::automation, nullptr);
+        c.setProperty (IDs::plugin, plugin->itemID.toVar(), nullptr);
+        c.setProperty (IDs::param, param.paramID, nullptr);
+        c.setProperty (IDs::name, describeParam (param), nullptr);
+        c.setProperty (IDs::lane, findFreeLane (start, length), nullptr);
+        c.setProperty (IDs::start, start, nullptr);
+        c.setProperty (IDs::length, length, nullptr);
+
+        const float v = param.getCurrentNormalisedValue();
+        for (double pos : { 0.0, length })
+        {
+            juce::ValueTree point (IDs::POINT);
+            point.setProperty (IDs::pos, pos, nullptr);
+            point.setProperty (IDs::value, v, nullptr);
+            point.setProperty (IDs::tension, 0.0, nullptr);
+            c.appendChild (point, nullptr);
+        }
+        getPlaylist().appendChild (c, &undo());
+        if (onAutomationClipCreated) onAutomationClipCreated();
+        return c;
+    }
+
+    // Keeps a clip's points sorted by position (the engine curve needs ascending times).
+    static void addAutomationPoint (juce::ValueTree clip, double pos, float value, juce::UndoManager* um)
+    {
+        juce::ValueTree point (IDs::POINT);
+        point.setProperty (IDs::pos, juce::jlimit (0.0, (double) clip[IDs::length], pos), nullptr);
+        point.setProperty (IDs::value, juce::jlimit (0.0f, 1.0f, value), nullptr);
+        point.setProperty (IDs::tension, 0.0, nullptr);
+        int index = 0;
+        while (index < clip.getNumChildren() && (double) clip.getChild (index)[IDs::pos] <= pos)
+            ++index;
+        clip.addChild (point, index, um);
+    }
+
+    // Automation recording: while playing in song mode, knob moves are written into a clip.
+    bool isRecordingAutomation() const      { return recordAutomation; }
+    void setRecordingAutomation (bool on)   { recordAutomation = on; }
+
+    void userChangedParam (te::AutomatableParameter& param)
+    {
+        if (! recordAutomation || ! isPlaying() || ! isSongMode() || param.getPlugin() == nullptr)
+            return;
+
+        const double now = getPositionBeats();
+        const auto pluginId = param.getPlugin()->itemID.toVar();
+        juce::ValueTree clip;
+        for (auto c : getPlaylist())
+            if (isAutomationClip (c) && c[IDs::plugin] == pluginId && c[IDs::param].toString() == param.paramID
+                && now >= (double) c[IDs::start] && now <= (double) c[IDs::start] + (double) c[IDs::length])
+                clip = c;
+
+        if (! clip.isValid())
+        {
+            const double start = std::floor (now / getBarBeats()) * getBarBeats();
+            const auto saved = onAutomationClipCreated;
+            onAutomationClipCreated = nullptr;
+            clip = createAutomationClip (param, start, getBarBeats() * 4.0);
+            onAutomationClipCreated = saved;
+            clip.removeAllChildren (nullptr);
+        }
+
+        const double pos = now - (double) clip[IDs::start];
+        // Drop points we're overwriting (within one step ahead), then add the new one.
+        for (int i = clip.getNumChildren(); --i >= 0;)
+        {
+            const double p = clip.getChild (i)[IDs::pos];
+            if (p > pos - 1.0e-6 && p < pos + stepBeats)
+                clip.removeChild (i, &undo());
+        }
+        addAutomationPoint (clip, pos, param.getCurrentNormalisedValue(), &undo());
+    }
+
+    //==========================================================================
+    // MIDI controller links (FL "Link to controller")
+
+    void startLearning (te::AutomatableParameter& param) { learning = &param; }
+    bool isLearning (te::AutomatableParameter& param) const { return learning == &param; }
+
+    void unlinkController (te::AutomatableParameter& param)
+    {
+        auto maps = studio.getChildWithName (IDs::MAPPINGS);
+        for (int i = maps.getNumChildren(); --i >= 0;)
+            if (findParam (maps.getChild (i)[IDs::plugin], maps.getChild (i)[IDs::param]) == &param)
+                maps.removeChild (i, &undo());
+    }
+
+    juce::String getControllerLink (te::AutomatableParameter& param) const
+    {
+        for (auto m : studio.getChildWithName (IDs::MAPPINGS))
+            if (findParam (m[IDs::plugin], m[IDs::param]) == &param)
+                return "CC " + m[IDs::cc].toString();
+        return {};
+    }
+
+    // Message thread: a CC arrived from any MIDI input.
+    void handleController (int channel, int cc, int value)
+    {
+        auto maps = studio.getChildWithName (IDs::MAPPINGS);
+        if (learning != nullptr && learning->getPlugin() != nullptr)
+        {
+            undo().beginNewTransaction ("Link to controller");
+            unlinkController (*learning);
+            juce::ValueTree m (IDs::MAP);
+            m.setProperty (IDs::cc, cc, nullptr);
+            m.setProperty (IDs::channel, channel, nullptr);
+            m.setProperty (IDs::plugin, learning->getPlugin()->itemID.toVar(), nullptr);
+            m.setProperty (IDs::param, learning->paramID, nullptr);
+            maps.appendChild (m, &undo());
+            learning = nullptr;
+        }
+
+        for (auto m : maps)
+            if ((int) m[IDs::cc] == cc && (int) m[IDs::channel] == channel)
+                if (auto param = findParam (m[IDs::plugin], m[IDs::param]))
+                {
+                    param->setNormalisedParameter ((float) value / 127.0f, juce::sendNotificationSync);
+                    userChangedParam (*param);
+                }
+    }
 
     double getSongLengthBeats() const
     {
@@ -706,6 +884,8 @@ private:
         // UI holding plugin/parameter pointers must let go before the old Edit dies.
         for (auto& fn : editAboutToChange)
             fn();
+        learning = nullptr;
+        automatedTargets.clear();
 
         if (edit != nullptr)
         {
@@ -721,7 +901,7 @@ private:
         edit->getTransport().looping = true;
 
         studio = edit->state.getOrCreateChildWithName (IDs::STUDIO, nullptr);
-        for (auto type : { IDs::CHANNELS, IDs::PATTERNS, IDs::PLAYLIST, IDs::INSERTS })
+        for (auto type : { IDs::CHANNELS, IDs::PATTERNS, IDs::PLAYLIST, IDs::INSERTS, IDs::MAPPINGS })
             studio.getOrCreateChildWithName (type, nullptr);
 
         studio.addListener (this);
@@ -787,6 +967,51 @@ private:
         sampler.addSound (file.getFullPathName(), file.getFileNameWithoutExtension(), 0.0, 0.0, 0.0f);
         sampler.setSoundParams (0, defaultRootNote, 0, 127);
         sampler.setSoundOpenEnded (0, true); // one-shot, like FL's sampler default
+    }
+
+    // Writes playlist automation clips into the engine's parameter curves (song mode only;
+    // FL automation clips belong to the playlist). Curves are derived, so no UndoManager.
+    void syncAutomation (bool song)
+    {
+        std::map<juce::String, juce::Array<juce::ValueTree>> byTarget;
+        for (auto c : getPlaylist())
+            if (isAutomationClip (c))
+                byTarget[c[IDs::plugin].toString() + "|" + c[IDs::param].toString()].add (c);
+
+        std::set<juce::String> stillAutomated;
+        for (auto& [key, clips] : byTarget)
+        {
+            auto param = findParam (clips.getFirst()[IDs::plugin], clips.getFirst()[IDs::param]);
+            if (param == nullptr)
+                continue;
+
+            stillAutomated.insert (key);
+            auto& curve = param->getCurve();
+            curve.clear (nullptr);
+            if (! song)
+                continue;
+
+            std::sort (clips.begin(), clips.end(), [] (auto& a, auto& b) { return (double) a[IDs::start] < (double) b[IDs::start]; });
+            for (auto& c : clips)
+            {
+                if ((bool) c[IDs::muted])
+                    continue;
+                for (auto point : c)
+                {
+                    const double beat = (double) c[IDs::start] + juce::jmin ((double) point[IDs::pos], (double) c[IDs::length]);
+                    curve.addPoint (edit->tempoSequence.toTime (te::BeatPosition::fromBeats (beat)),
+                                    param->valueRange.convertFrom0to1 ((float) point[IDs::value]),
+                                    (float) point[IDs::tension], nullptr);
+                }
+            }
+        }
+
+        // Params whose clips were all deleted: drop their curves.
+        for (auto& key : automatedTargets)
+            if (! stillAutomated.count (key))
+                if (auto param = findParam (key.upToFirstOccurrenceOf ("|", false, false), key.fromFirstOccurrenceOf ("|", false, false)))
+                    param->getCurve().clear (nullptr);
+        automatedTargets = stillAutomated;
     }
 
     // Keeps the track's wave clips in step with the playlist's audio clips (song mode only).
@@ -908,7 +1133,7 @@ private:
             if (song)
             {
                 for (auto pc : getPlaylist())
-                    if (! isAudioClip (pc) && ! (bool) pc[IDs::muted])
+                    if (isPatternClip (pc) && ! (bool) pc[IDs::muted])
                         addNotes (getPattern (pc[IDs::pattern]), pc[IDs::start], pc[IDs::length], pc[IDs::offset]);
             }
             else
@@ -923,6 +1148,8 @@ private:
             clip->state.setProperty (te::IDs::start, 0.0, nullptr);
             clip->state.setProperty (te::IDs::length, endTime.inSeconds(), nullptr);
         }
+
+        syncAutomation (song);
 
         auto loop = juce::Range<double> (0.0, endBeats);
         if (song && getSongLoop().getLength() > 1.0e-6)
@@ -978,6 +1205,9 @@ private:
 
     std::unique_ptr<te::Edit> edit;
     juce::ValueTree studio;
+    std::set<juce::String> automatedTargets;
+    te::AutomatableParameter* learning = nullptr;
+    bool recordAutomation = false;
     int selectedChannel = 0;
     int changeCount = 0, editGeneration = 0;
     bool dirty = false;

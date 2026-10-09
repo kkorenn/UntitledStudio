@@ -227,11 +227,12 @@ Every effect has a themed window, bypass, factory presets (main ones) and user p
 **Done when:** Serum/Vital + FabFilter-type plugins load, save, reload correctly.
 
 ## Phase 11 — Automation
-- [ ] Automation clips on playlist (any knob → right-click → "create automation clip")
-- [ ] Curve editing: points, curve tension, shapes
-- [ ] Automate plugin params too
-- [ ] Record knob movements live
-- [ ] MIDI controller mapping ("link to controller")
+- [x] Automation clips on playlist (any knob → right-click → "create automation clip")
+- [x] Curve editing: points, curve tension (mouse wheel)
+- [ ] Preset curve shapes (saw, sine, steps...)
+- [x] Automate plugin params too
+- [x] Record knob movements live (record button, SONG mode)
+- [x] MIDI controller mapping ("link to controller")
 
 **Done when:** filter sweep automation into the drop works on both stock and 3rd-party plugins.
 

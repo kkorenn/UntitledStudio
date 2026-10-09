@@ -109,6 +109,7 @@ private:
 class MainComponent : public juce::Component,
                       public juce::MenuBarModel,
                       private juce::ChangeListener,
+                      private juce::MidiInputCallback,
                       public juce::DragAndDropContainer,
                       private juce::Timer
 {
@@ -128,7 +129,9 @@ public:
 
         playButton.onClick = [this] { studio.togglePlay(); };
         stopButton.onClick = [this] { if (studio.isPlaying()) studio.togglePlay(); else studio.transport().setPosition (0s); };
-        recordButton.setEnabled (false);
+        recordButton.setClickingTogglesState (true);
+        recordButton.setTooltip ("Record automation: move knobs while playing in SONG mode");
+        recordButton.onClick = [this] { studio.setRecordingAutomation (recordButton.getToggleState()); };
         for (auto* b : { &playButton, &stopButton, &recordButton })
             addAndMakeVisible (b);
 
@@ -168,6 +171,15 @@ public:
         browser.onOpenProject = [this] (const juce::File& f) { maybeSave ([this, f] { openFile (f); }); };
         browser.onPluginChosen = [this] (const juce::PluginDescription& d) { addPlugin (d); };
         studio.engine.getPluginManager().knownPluginList.addChangeListener (this);
+
+        // FL: creating an automation clip shows it in the playlist and switches to song mode.
+        studio.onAutomationClipCreated = [this] { studio.setSongMode (true); playlistPanel->show(); };
+
+        // MIDI controller knobs (CC) for "Link to controller".
+        auto& dm = studio.engine.getDeviceManager().deviceManager;
+        for (auto& d : juce::MidiInput::getAvailableDevices())
+            dm.setMidiInputDeviceEnabled (d.identifier, true);
+        dm.addMidiInputDeviceCallback ({}, this);
         addAndMakeVisible (browser);
         addAndMakeVisible (workspace);
 
@@ -232,6 +244,7 @@ public:
     ~MainComponent() override
     {
         studio.engine.getPluginManager().knownPluginList.removeChangeListener (this);
+        studio.engine.getDeviceManager().deviceManager.removeMidiInputDeviceCallback ({}, this);
         if (cleanExit)
         {
             getAutosaveFile().deleteFile();
@@ -378,6 +391,17 @@ public:
     }
 
     void changeListenerCallback (juce::ChangeBroadcaster*) override { browser.refreshPlugins(); } // plugin scan finished
+
+    // MIDI thread: forward controller moves to the message thread.
+    void handleIncomingMidiMessage (juce::MidiInput*, const juce::MidiMessage& m) override
+    {
+        if (m.isController())
+            juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<MainComponent> (this),
+                                              ch = m.getChannel(), cc = m.getControllerNumber(), v = m.getControllerValue()]
+            {
+                if (safe != nullptr) safe->studio.handleController (ch, cc, v);
+            });
+    }
 
     void menuItemSelected (int itemId, int) override
     {
@@ -692,6 +716,7 @@ private:
 
         tempo.setValue (studio.getBpm());
         playButton.setToggleState (studio.isPlaying(), juce::dontSendNotification);
+        recordButton.setToggleState (studio.isRecordingAutomation(), juce::dontSendNotification);
         metronome.setToggleState (studio.isMetronomeOn(), juce::dontSendNotification);
         updatePatSong();
 
@@ -812,6 +837,13 @@ public:
         for (int bar = 2; bar < 8; ++bar)
             studio.addPatternClip (p2, 1, bar * 4.0);
         studio.addAudioClip (DrumKit::getDrumsFolder().getChildFile ("808.wav"), 2, 4.0);
+        if (auto t = studio.getTrack (studio.getChannels().getChild (0)[IDs::id]))
+        {
+            auto clip = studio.createAutomationClip (*t->getVolumePlugin()->volParam, 0.0, 32.0);
+            Studio::addAutomationPoint (clip, 8.0, 0.2f, nullptr);
+            Studio::addAutomationPoint (clip, 16.0, 0.9f, nullptr);
+            clip.getChild (1).setProperty (IDs::tension, 0.6, nullptr);
+        }
         studio.setSongMode (true);
         channelRackPanel->setVisible (false);
     }
@@ -987,6 +1019,32 @@ namespace SelfTest
                 if (p != nullptr) s.removePlugin (*p);
                 engine.getPluginManager().knownPluginList.removeType (*found[0]);
             }
+        }
+
+        {
+            // Automation clip on the kick's volume drives the engine curve in song mode.
+            auto vol = s.getTrack (kick)->getVolumePlugin()->volParam;
+            s.setSongMode (true);
+            auto clip = s.createAutomationClip (*vol, 0.0, 8.0);
+            clip.getChild (0).setProperty (IDs::value, 0.0, nullptr);
+            clip.getChild (1).setProperty (IDs::value, 1.0, nullptr);
+            s.regenerateNow();
+            ok &= check (vol->getCurve().getNumPoints() == 2, "automation clip writes engine curve");
+            const auto mid = s.getEdit().tempoSequence.toTime (te::BeatPosition::fromBeats (4.0));
+            const float midValue = vol->valueRange.convertTo0to1 (vol->getCurve().getValueAt (mid, 0.0f));
+            ok &= check (std::abs (midValue - 0.5f) < 0.05f, "automation ramps between points");
+            s.setSongMode (false);
+            s.regenerateNow();
+            ok &= check (vol->getCurve().getNumPoints() == 0, "pattern mode ignores automation clips");
+            s.getPlaylist().removeChild (clip, nullptr);
+
+            // MIDI learn: link CC 20 then move it.
+            auto pan = s.getTrack (kick)->getVolumePlugin()->panParam;
+            s.startLearning (*pan);
+            s.handleController (1, 20, 64);
+            ok &= check (s.getControllerLink (*pan) == "CC 20", "link to controller learns CC");
+            s.handleController (1, 20, 127);
+            ok &= check (pan->getCurrentNormalisedValue() > 0.99f, "controller moves the knob");
         }
 
         const auto file = juce::File::createTempFile (Studio::fileExtension);

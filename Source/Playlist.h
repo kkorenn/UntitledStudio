@@ -288,10 +288,12 @@ private:
         void paintClip (juce::Graphics& g, const juce::ValueTree& c, juce::Rectangle<int> r)
         {
             const bool audio = Studio::isAudioClip (c);
+            const bool automation = Studio::isAutomationClip (c);
             const bool muted = c[IDs::muted];
             const bool selected = list.selection.contains (c);
             const auto pattern = list.studio.getPattern (c[IDs::pattern]);
-            auto colour = audio ? juce::Colour (0xff4a9a9a) : list.studio.getPatternColour (pattern);
+            auto colour = audio ? juce::Colour (0xff4a9a9a)
+                                : (automation ? juce::Colour (0xffb47ad8) : list.studio.getPatternColour (pattern));
             if (muted)
                 colour = colour.withSaturation (0.0f).darker (0.4f);
 
@@ -303,7 +305,8 @@ private:
             g.setColour (selected ? juce::Colours::white : juce::Colours::black.withAlpha (0.6f));
             g.drawRoundedRectangle (rf.reduced (0.5f), 3.0f, selected ? 1.6f : 1.0f);
 
-            const auto name = audio ? list.studio.getChannel (c[IDs::channel])[IDs::name].toString() : pattern[IDs::name].toString();
+            const auto name = audio ? list.studio.getChannel (c[IDs::channel])[IDs::name].toString()
+                                    : (automation ? c[IDs::name].toString() : pattern[IDs::name].toString());
             g.setColour (juce::Colours::black.withAlpha (0.85f));
             g.setFont (Theme::font (11.0f, true));
             g.drawText (name, r.withHeight (13).reduced (4, 0), juce::Justification::centredLeft, true);
@@ -311,7 +314,42 @@ private:
             auto body = r.withTrimmedTop (14).reduced (2, 2);
             g.saveState();
             g.reduceClipRegion (body);
-            if (audio)
+            if (automation)
+            {
+                // Curve through the points (tension bends each segment), FL style.
+                juce::Path curve;
+                const int n = c.getNumChildren();
+                for (int i = 0; i < n; ++i)
+                {
+                    const auto p = pointPosition (c, c.getChild (i), r);
+                    if (i == 0)
+                    {
+                        curve.startNewSubPath ((float) r.getX(), p.y);
+                        curve.lineTo (p);
+                    }
+                    else
+                    {
+                        const auto prev = pointPosition (c, c.getChild (i - 1), r);
+                        const float tension = (float) c.getChild (i - 1)[IDs::tension];
+                        for (int k = 1; k <= 12; ++k)
+                        {
+                            const float t = (float) k / 12.0f;
+                            const float shaped = tension >= 0.0f ? std::pow (t, 1.0f + tension * 3.0f) : 1.0f - std::pow (1.0f - t, 1.0f - tension * 3.0f);
+                            curve.lineTo (prev.x + (p.x - prev.x) * t, prev.y + (p.y - prev.y) * shaped);
+                        }
+                    }
+                }
+                if (n > 0)
+                    curve.lineTo ((float) r.getRight(), pointPosition (c, c.getChild (n - 1), r).y);
+                g.setColour (colour.brighter (0.6f));
+                g.strokePath (curve, juce::PathStrokeType (1.6f));
+                for (auto point : c)
+                {
+                    const auto p = pointPosition (c, point, r);
+                    g.fillEllipse (p.x - 3.0f, p.y - 3.0f, 6.0f, 6.0f);
+                }
+            }
+            else if (audio)
             {
                 if (auto* thumb = getThumbnail (juce::File (list.studio.getChannel (c[IDs::channel])[IDs::file].toString())))
                 {
@@ -367,6 +405,29 @@ private:
 
         void changeListenerCallback (juce::ChangeBroadcaster*) override { repaint(); }
 
+        // Automation point position inside clip bounds r.
+        juce::Point<float> pointPosition (const juce::ValueTree& clip, const juce::ValueTree& point, juce::Rectangle<int> r) const
+        {
+            const auto body = r.withTrimmedTop (14).reduced (2, 3).toFloat();
+            juce::ignoreUnused (clip);
+            return { (float) r.getX() + (float) list.beatToX (point[IDs::pos]),
+                     body.getBottom() - (float) point[IDs::value] * body.getHeight() };
+        }
+
+        juce::ValueTree pointAt (const juce::ValueTree& clip, juce::Point<int> p) const
+        {
+            const auto r = list.clipBounds (clip);
+            for (auto point : clip)
+                if (pointPosition (clip, point, r).getDistanceFrom (p.toFloat()) < 7.0f)
+                    return point;
+            return {};
+        }
+
+        bool inAutomationBody (const juce::ValueTree& clip, juce::Point<int> p) const
+        {
+            return Studio::isAutomationClip (clip) && p.y > list.clipBounds (clip).getY() + 14;
+        }
+
         void mouseDown (const juce::MouseEvent& e) override
         {
             mode = Mode::none;
@@ -376,6 +437,30 @@ private:
             for (int i = list.selection.size(); --i >= 0;)
                 if (! list.selection.getReference (i).getParent().isValid())
                     list.selection.remove (i);
+
+            // Automation clip body: edit points (pencil). Right-click deletes a point.
+            if (hit.isValid() && inAutomationBody (hit, e.getPosition()) && (list.tool == Tool::pencil || list.tool == Tool::brush))
+            {
+                list.studio.undo().beginNewTransaction ("Edit automation");
+                auto point = pointAt (hit, e.getPosition());
+                if (e.mods.isPopupMenu())
+                {
+                    if (point.isValid() && hit.getNumChildren() > 1)
+                        hit.removeChild (point, &list.studio.undo());
+                    return;
+                }
+                if (! point.isValid())
+                {
+                    const double pos = list.snapRound (downBeat) - (double) hit[IDs::start];
+                    Studio::addAutomationPoint (hit, pos, 0.5f, &list.studio.undo());
+                    point = pointAt (hit, { list.beatToX ((double) hit[IDs::start] + pos), e.y });
+                }
+                draggedPoint = point;
+                draggedClip = hit;
+                mode = Mode::point;
+                mouseDrag (e);
+                return;
+            }
 
             if (e.mods.isPopupMenu() || list.tool == Tool::erase)
             {
@@ -423,7 +508,7 @@ private:
                         list.selection.clear();
                     list.selection.add (hit);
                 }
-                if (! Studio::isAudioClip (hit))
+                if (Studio::isPatternClip (hit))
                     list.studio.setCurrentPattern (hit[IDs::pattern]); // FL: clicking a clip picks its pattern
 
                 const auto b = list.clipBounds (hit);
@@ -511,6 +596,23 @@ private:
                     break;
                 }
 
+                case Mode::point:
+                {
+                    if (! draggedPoint.isValid() || ! draggedClip.isValid())
+                        break;
+                    const auto r = list.clipBounds (draggedClip);
+                    const auto body = r.withTrimmedTop (14).reduced (2, 3);
+                    const int index = draggedClip.indexOf (draggedPoint);
+                    const double lo = index > 0 ? (double) draggedClip.getChild (index - 1)[IDs::pos] : 0.0;
+                    const double hi = index < draggedClip.getNumChildren() - 1 ? (double) draggedClip.getChild (index + 1)[IDs::pos]
+                                                                               : (double) draggedClip[IDs::length];
+                    const double pos = juce::jlimit (lo, hi, list.snapRound (beat) - (double) draggedClip[IDs::start]);
+                    const float value = juce::jlimit (0.0f, 1.0f, (float) (body.getBottom() - e.y) / (float) body.getHeight());
+                    draggedPoint.setProperty (IDs::pos, pos, &um);
+                    draggedPoint.setProperty (IDs::value, value, &um);
+                    break;
+                }
+
                 case Mode::none:
                     break;
             }
@@ -527,7 +629,7 @@ private:
         void mouseDoubleClick (const juce::MouseEvent& e) override
         {
             auto hit = list.clipAt (e.getPosition());
-            if (hit.isValid() && ! Studio::isAudioClip (hit))
+            if (hit.isValid() && Studio::isPatternClip (hit))
             {
                 list.studio.setCurrentPattern (hit[IDs::pattern]);
                 if (list.onShowChannelRack) list.onShowChannelRack();
@@ -547,6 +649,18 @@ private:
 
         void mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& w) override
         {
+            // Wheel over an automation point bends the curve after it.
+            if (auto clip = list.clipAt (e.getPosition()); clip.isValid() && inAutomationBody (clip, e.getPosition()))
+            {
+                if (auto point = pointAt (clip, e.getPosition()); point.isValid())
+                {
+                    list.studio.undo().beginNewTransaction ("Curve tension");
+                    point.setProperty (IDs::tension, juce::jlimit (-1.0, 1.0, (double) point[IDs::tension] + (w.deltaY > 0 ? 0.1 : -0.1)),
+                                       &list.studio.undo());
+                    return;
+                }
+            }
+
             if (e.mods.isCtrlDown() || e.mods.isCommandDown())
             {
                 const double beatAtMouse = list.xToBeat (e.x);
@@ -562,7 +676,8 @@ private:
         }
 
     private:
-        enum class Mode { none, move, resizeStart, resizeEnd, erase, lasso, brush, mute };
+        enum class Mode { none, move, resizeStart, resizeEnd, erase, lasso, brush, mute, point };
+        juce::ValueTree draggedPoint, draggedClip;
         struct Original { juce::ValueTree clip; double start, length, offset; int lane; };
 
         void slice (juce::ValueTree c, double at)

@@ -223,7 +223,7 @@ public:
                 if (auto sampler = dynamic_cast<te::SamplerPlugin*> (plugin.get()))
                     editor = std::make_unique<SamplerView> (studio, channelId, *sampler);
                 else
-                    editor = std::make_unique<GenericPluginEditor> (*plugin);
+                    editor = std::make_unique<GenericPluginEditor> (studio, *plugin);
                 addAndMakeVisible (*editor);
             }
         }

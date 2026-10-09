@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Effects.h"
+#include "ParamKnob.h"
 
 // Peak meter fed by a Tracktion LevelMeterPlugin.
 class PeakMeter : public juce::Component, private juce::Timer
@@ -102,12 +103,16 @@ private:
 
             if (auto vp = studio.getInsertVolume (index))
             {
-                bind (fader, vp->volParam);
-                bind (pan, vp->panParam);
+                fader.bind (studio, vp->volParam);
+                pan.bind (studio, vp->panParam);
             }
             fader.setSliderStyle (juce::Slider::LinearVertical);
             fader.setTextBoxStyle (juce::Slider::NoTextBox, true, 0, 0);
-            Widgets::setupKnob (pan, "Pan", true);
+            for (auto* k : { &fader, &pan })
+            {
+                auto previous = k->onDragStart;
+                k->onDragStart = [this, previous] { mixer.select (index); if (previous) previous(); };
+            }
             addAndMakeVisible (fader);
             addAndMakeVisible (pan);
             addAndMakeVisible (meter);
@@ -138,10 +143,8 @@ private:
         {
             if (auto t = studio.getInsertTrack (index))
                 mute.setToggleState (! t->isMuted (false), juce::dontSendNotification);
-            for (auto* s : { &fader, &pan })
-                if (auto* p = static_cast<te::AutomatableParameter*> (s->getProperties()["param"].getObject()))
-                    if (! s->isMouseButtonDown())
-                        s->setValue (p->getCurrentValue(), juce::dontSendNotification);
+            fader.sync();
+            pan.sync();
         }
 
         void paint (juce::Graphics& g) override
@@ -197,30 +200,11 @@ private:
         const int index;
 
     private:
-        void bind (juce::Slider& s, te::AutomatableParameter::Ptr param)
-        {
-            const auto range = param->valueRange;
-            s.setNormalisableRange ({ range.start, range.end, 0.0, range.skew });
-            s.setValue (param->getCurrentValue(), juce::dontSendNotification);
-            if (auto def = param->getDefaultValue())
-                s.setDoubleClickReturnValue (true, *def);
-            s.getProperties().set ("param", param.get());
-            s.onDragStart = [this, param] { mixer.select (index); studio.undo().beginNewTransaction ("Mixer"); param->parameterChangeGestureBegin(); };
-            s.onDragEnd   = [param] { param->parameterChangeGestureEnd(); };
-            s.onValueChange = [&s, param]
-            {
-                param->setParameter ((float) s.getValue(), juce::sendNotificationSync);
-                s.setTooltip (param->getParameterName() + ": " + param->getCurrentValueAsStringWithLabel());
-            };
-            params.add (param);
-        }
-
         Mixer& mixer;
         Studio& studio;
-        juce::Slider fader, pan;
+        ParamKnob fader, pan;
         PeakMeter meter;
         Widgets::LedButton mute { "Mute (left-click) / Solo (right-click)" };
-        juce::Array<te::AutomatableParameter::Ptr> params;
     };
 
     //==========================================================================
@@ -235,7 +219,7 @@ private:
             addAndMakeVisible (addSendButton);
         }
 
-        void clear() { sendKnobs.clear(); sendParams.clear(); }
+        void clear() { sendKnobs.clear(); }
 
         void refresh()
         {
@@ -244,20 +228,11 @@ private:
                 effects.add (p);
 
             sendKnobs.clear();
-            sendParams.clear();
             for (auto send : studio.getInsertSends (mixer.selected))
             {
-                auto* k = sendKnobs.add (new juce::Slider());
-                Widgets::setupKnob (*k, "Send to " + send->getBusName());
-                auto param = send->getAutomatableParameter (0);
-                if (param != nullptr)
-                {
-                    k->setNormalisableRange ({ param->valueRange.start, param->valueRange.end });
-                    k->setValue (param->getCurrentValue(), juce::dontSendNotification);
-                    k->onDragStart = [this] { studio.undo().beginNewTransaction ("Send level"); };
-                    k->onValueChange = [k, param] { param->setParameter ((float) k->getValue(), juce::sendNotificationSync); };
-                    sendParams.add (param);
-                }
+                auto* k = sendKnobs.add (new ParamKnob());
+                if (auto param = send->getAutomatableParameter (0))
+                    k->bind (studio, param);
                 k->getProperties().set ("name", send->getBusName());
                 addAndMakeVisible (k);
             }
@@ -386,8 +361,7 @@ private:
         Mixer& mixer;
         Studio& studio;
         juce::Array<te::Plugin*> effects;
-        juce::OwnedArray<juce::Slider> sendKnobs;
-        juce::Array<te::AutomatableParameter::Ptr> sendParams;
+        juce::OwnedArray<ParamKnob> sendKnobs;
         juce::TextButton addSendButton { "+ Add send" };
     };
 
