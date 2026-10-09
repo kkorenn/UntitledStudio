@@ -13,12 +13,22 @@ public:
     //==========================================================================
     // FL: drop a sound on a channel to replace it, or on empty space to add a new channel.
 
-    bool isInterestedInDragSource (const SourceDetails& d) override { return d.description.toString().startsWith ("file:"); }
+    bool isInterestedInDragSource (const SourceDetails& d) override
+    {
+        return d.description.toString().startsWith ("file:") || d.description.toString().startsWith ("plugin:");
+    }
     void itemDragMove (const SourceDetails& d) override              { setDropHighlight (d.localPosition); }
     void itemDragExit (const SourceDetails&) override                { setDropHighlight ({ -1, -1 }); }
 
     void itemDropped (const SourceDetails& d) override
     {
+        setDropHighlight ({ -1, -1 });
+        if (d.description.toString().startsWith ("plugin:"))
+        {
+            if (auto desc = studio.findKnownPlugin (d.description.toString().substring (7)); desc && desc->isInstrument)
+                studio.selectChannel (studio.addPluginChannel (*desc));
+            return;
+        }
         dropFile (juce::File (d.description.toString().fromFirstOccurrenceOf ("file:", false, false)), d.localPosition);
     }
 
@@ -33,6 +43,7 @@ public:
     }
 
     std::function<void (int channelId)> onOpenChannel, onOpenPianoRoll;
+    std::function<void()> onManagePlugins;
 
     explicit ChannelRack (Studio& s) : studio (s)
     {
@@ -409,6 +420,18 @@ private:
             const int id = studio.addSynthChannel();
             studio.selectChannel (id);
         });
+
+        juce::PopupMenu plugins;
+        for (auto& d : studio.getKnownPlugins (true))
+            plugins.addItem (d.name + "  (" + d.manufacturerName + ")", [this, d]
+            {
+                const int id = studio.addPluginChannel (d);
+                studio.selectChannel (id);
+                if (auto p = studio.getInstrument (id)) p->showWindowExplicitly();
+            });
+        plugins.addSeparator();
+        plugins.addItem ("Scan / manage plugins...", [this] { if (onManagePlugins) onManagePlugins(); });
+        m.addSubMenu ("Plugins (VST3 / AU)", plugins);
         m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (addButton));
     }
 

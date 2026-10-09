@@ -34,6 +34,7 @@ namespace ChannelType
     inline const juce::String sampler = "sampler";
     inline const juce::String synth   = "synth";
     inline const juce::String audio   = "audio";   // FL "audio clip" channel: plays playlist audio clips
+    inline const juce::String plugin  = "plugin";  // third-party instrument
 }
 
 class Studio : private juce::ValueTree::Listener,
@@ -183,6 +184,41 @@ public:
         auto plugin = edit->getPluginCache().createNewPlugin (te::FourOscPlugin::xmlTypeName, {});
         track->pluginList.insertPlugin (plugin, 0, nullptr);
         return addChannelState (*track, ChannelType::synth, "Synth", {});
+    }
+
+    // Third-party instrument (VST3 / AU) as a channel.
+    int addPluginChannel (const juce::PluginDescription& desc)
+    {
+        undo().beginNewTransaction ("Add plugin channel");
+        auto track = createChannelTrack (desc.name);
+        if (auto plugin = edit->getPluginCache().createNewPlugin (te::ExternalPlugin::xmlTypeName, desc))
+            track->pluginList.insertPlugin (plugin, 0, nullptr);
+        return addChannelState (*track, ChannelType::plugin, desc.name, {});
+    }
+
+    juce::Array<juce::PluginDescription> getKnownPlugins (bool instruments) const
+    {
+        juce::Array<juce::PluginDescription> result;
+        for (auto& d : engine.getPluginManager().knownPluginList.getTypes())
+            if (d.isInstrument == instruments)
+                result.add (d);
+        std::sort (result.begin(), result.end(), [] (auto& a, auto& b) { return a.name.compareIgnoreCase (b.name) < 0; });
+        return result;
+    }
+
+    std::optional<juce::PluginDescription> findKnownPlugin (const juce::String& identifier) const
+    {
+        if (auto d = engine.getPluginManager().knownPluginList.getTypeForIdentifierString (identifier))
+            return *d;
+        return std::nullopt;
+    }
+
+    // First plugin on a channel's track (its instrument).
+    te::Plugin* getInstrument (int channelId) const
+    {
+        if (auto t = getTrack (channelId))
+            return t->pluginList.getPlugins().getFirst().get();
+        return nullptr;
     }
 
     void replaceSample (int channelId, const juce::File& file)
@@ -400,7 +436,16 @@ public:
             return {};
 
         undo().beginNewTransaction ("Add effect");
-        auto plugin = edit->getPluginCache().createNewPlugin (xmlType, {});
+        te::Plugin::Ptr plugin;
+        if (xmlType.startsWith ("ext:"))   // third-party effect, by identifier
+        {
+            if (auto desc = findKnownPlugin (xmlType.substring (4)))
+                plugin = edit->getPluginCache().createNewPlugin (te::ExternalPlugin::xmlTypeName, *desc);
+        }
+        else
+        {
+            plugin = edit->getPluginCache().createNewPlugin (xmlType, {});
+        }
         if (plugin == nullptr)
             return {};
 

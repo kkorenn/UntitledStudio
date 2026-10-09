@@ -215,13 +215,14 @@ Every effect has a themed window, bypass, factory presets (main ones) and user p
 **Done when:** mix a song using only stock effects and it sounds clean.
 
 ## Phase 10 — Third-party plugin hosting
-- [ ] Scan VST3 + AU plugins (scan in separate process so bad plugins can't crash the DAW)
-- [ ] Plugin browser / favorites
-- [ ] Load instruments in channel rack, effects in mixer
-- [ ] Open plugin GUI windows
-- [ ] Save/restore plugin state in project
-- [ ] CLAP support
-- [ ] Plugin crash protection / blacklist
+- [x] Scan VST3 + AU plugins (scan in separate process so bad plugins can't crash the DAW)
+- [x] Plugin browser / favorites
+- [x] Load instruments in channel rack, effects in mixer
+- [x] Open plugin GUI windows
+- [x] Save/restore plugin state in project (Tracktion)
+- [ ] CLAP support (JUCE 9 has no CLAP hosting yet; needs clap-host library)
+- [x] Scan-time crash protection / blacklist (out-of-process scan)
+- [ ] Run plugins sandboxed so a crash during playback can't kill the app
 
 **Done when:** Serum/Vital + FabFilter-type plugins load, save, reload correctly.
 

@@ -332,10 +332,11 @@ private:
                         if (auto p = studio.addEffect (insert, type))
                         {
                             Effects::prepareNew (*p);
-                            if (mixer.onOpenEffect) mixer.onOpenEffect (*p);
+                            if (dynamic_cast<te::ExternalPlugin*> (p.get()) != nullptr) p->showWindowExplicitly();
+                            else if (mixer.onOpenEffect) mixer.onOpenEffect (*p);
                         }
                         refresh();
-                    });
+                    }, studio.getKnownPlugins (false));
                     return;
                 }
 
@@ -350,14 +351,21 @@ private:
                         return;
                     }
                     juce::PopupMenu m;
-                    m.addItem ("Open", [this, p] { if (mixer.onOpenEffect) mixer.onOpenEffect (*p); });
+                    m.addItem ("Open", [this, p]
+                    {
+                        if (dynamic_cast<te::ExternalPlugin*> (p.get()) != nullptr) p->showWindowExplicitly();
+                        else if (mixer.onOpenEffect) mixer.onOpenEffect (*p);
+                    });
                     m.addItem (p->isEnabled() ? "Bypass" : "Enable", [this, p] { studio.undo().beginNewTransaction ("Bypass"); p->setEnabled (! p->isEnabled()); repaint(); });
                     m.addItem ("Remove", [this, p] { studio.removePlugin (*p); refresh(); });
                     m.showMenuAsync ({});
                     return;
                 }
 
-                if (mixer.onOpenEffect) mixer.onOpenEffect (*p);
+                if (dynamic_cast<te::ExternalPlugin*> (p.get()) != nullptr)
+                    p->showWindowExplicitly();
+                else if (mixer.onOpenEffect)
+                    mixer.onOpenEffect (*p);
                 return;
             }
         }

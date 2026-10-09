@@ -14,6 +14,7 @@ using namespace std::literals;
 #include "PianoRoll.h"
 #include "Playlist.h"
 #include "Mixer.h"
+#include "PluginWindow.h"
 
 //==============================================================================
 // FL "typing keyboard to piano": Z-row = lower octave, Q-row = upper octave.
@@ -107,6 +108,7 @@ private:
 //==============================================================================
 class MainComponent : public juce::Component,
                       public juce::MenuBarModel,
+                      private juce::ChangeListener,
                       public juce::DragAndDropContainer,
                       private juce::Timer
 {
@@ -164,6 +166,8 @@ public:
         addAndMakeVisible (browserButton);
 
         browser.onOpenProject = [this] (const juce::File& f) { maybeSave ([this, f] { openFile (f); }); };
+        browser.onPluginChosen = [this] (const juce::PluginDescription& d) { addPlugin (d); };
+        studio.engine.getPluginManager().knownPluginList.addChangeListener (this);
         addAndMakeVisible (browser);
         addAndMakeVisible (workspace);
 
@@ -175,7 +179,14 @@ public:
         playlistPanel->setBounds (10, 10, 1100, 700);
 
         auto rack = std::make_unique<ChannelRack> (studio);
-        rack->onOpenChannel = [this] (int id) { toggleChannelWindow (id); };
+        rack->onOpenChannel = [this] (int id)
+        {
+            // Third-party instruments open their own window (FL's plugin wrapper).
+            if (auto p = studio.getInstrument (id); p != nullptr && dynamic_cast<te::ExternalPlugin*> (p) != nullptr)
+                return p->showWindowExplicitly();
+            toggleChannelWindow (id);
+        };
+        rack->onManagePlugins = [this] { showPluginManager(); };
         rack->onOpenPianoRoll = [this] (int id) { studio.selectChannel (id); pianoRollPanel->show(); };
         channelRackPanel = std::make_unique<Panel> ("Channel rack", std::move (rack));
         workspace.addAndMakeVisible (*channelRackPanel);
@@ -220,6 +231,7 @@ public:
 
     ~MainComponent() override
     {
+        studio.engine.getPluginManager().knownPluginList.removeChangeListener (this);
         if (cleanExit)
         {
             getAutosaveFile().deleteFile();
@@ -360,9 +372,12 @@ public:
         else if (index == 2)
         {
             m.addItem ("Audio settings... (F10)", [this] { showAudioSettings(); });
+            m.addItem ("Manage plugins...", [this] { showPluginManager(); });
         }
         return m;
     }
+
+    void changeListenerCallback (juce::ChangeBroadcaster*) override { browser.refreshPlugins(); } // plugin scan finished
 
     void menuItemSelected (int itemId, int) override
     {
@@ -484,6 +499,41 @@ private:
         o.useNativeTitleBar = true;
         o.resizable = false;
         o.launchAsync();
+    }
+
+    // Scan for VST3 / AU plugins (out of process, crashing plugins get blacklisted).
+    void showPluginManager()
+    {
+        auto& pm = studio.engine.getPluginManager();
+        auto* list = new juce::PluginListComponent (pm.pluginFormatManager, pm.knownPluginList,
+                                                    studio.engine.getTemporaryFileManager().getTempFile ("PluginScanDeadMansPedal"),
+                                                    std::addressof (studio.engine.getPropertyStorage().getPropertiesFile()));
+        list->setSize (720, 520);
+
+        juce::DialogWindow::LaunchOptions o;
+        o.content.setOwned (list);
+        o.dialogTitle = "Plugins";
+        o.dialogBackgroundColour = Theme::panelDark;
+        o.escapeKeyTriggersCloseButton = true;
+        o.useNativeTitleBar = true;
+        o.resizable = true;
+        o.launchAsync();
+    }
+
+    void addPlugin (const juce::PluginDescription& d)
+    {
+        if (d.isInstrument)
+        {
+            const int id = studio.addPluginChannel (d);
+            studio.selectChannel (id);
+            if (auto p = studio.getInstrument (id)) p->showWindowExplicitly();
+        }
+        else if (auto* m = dynamic_cast<Mixer*> (&mixerPanel->getContent()))
+        {
+            if (auto p = studio.addEffect (m->getSelectedInsert(), "ext:" + d.createIdentifierString()))
+                p->showWindowExplicitly();
+            mixerPanel->show();
+        }
     }
 
     void openEffectWindow (te::Plugin& plugin)
@@ -819,7 +869,7 @@ public:
 // Headless checks: `untitledstudio --selftest`. Exit code 0 = pass.
 namespace SelfTest
 {
-    inline bool check (bool condition, const char* what)
+    inline bool check (bool condition, const juce::String& what)
     {
         std::cout << (condition ? "  ok   " : "  FAIL ") << what << std::endl;
         return condition;
@@ -917,6 +967,26 @@ namespace SelfTest
             ok &= check (std::abs (lowGain - 6.0f) < 0.01f, "factory preset applies");
             s.removePlugin (*eq);
             ok &= check (Effects::airwindows().size() > 150, "Airwindows library available");
+
+            // Third-party hosting: load one of Apple's built-in Audio Units as an effect.
+            juce::AudioUnitPluginFormat au;
+            juce::OwnedArray<juce::PluginDescription> found;
+            for (auto& id : au.searchPathsForPlugins ({}, false, false))
+                if (id.containsIgnoreCase ("dely,appl") || id.containsIgnoreCase ("lpas,appl"))
+                {
+                    au.findAllTypesForFile (found, id);
+                    if (! found.isEmpty()) break;
+                }
+            ok &= check (! found.isEmpty(), "found Apple's built-in Audio Units");
+            if (! found.isEmpty())
+            {
+                engine.getPluginManager().knownPluginList.addType (*found[0]);
+                auto p = s.addEffect (7, "ext:" + found[0]->createIdentifierString());
+                auto ext = dynamic_cast<te::ExternalPlugin*> (p.get());
+                ok &= check (ext != nullptr && ext->getAudioPluginInstance() != nullptr, "hosts an Audio Unit (" + found[0]->name + ")");
+                if (p != nullptr) s.removePlugin (*p);
+                engine.getPluginManager().knownPluginList.removeType (*found[0]);
+            }
         }
 
         const auto file = juce::File::createTempFile (Studio::fileExtension);
@@ -947,7 +1017,12 @@ public:
 
     void initialise (const juce::String& commandLine) override
     {
-        engine = std::make_unique<te::Engine> ("untitledstudio");
+        // When launched as the plugin-scanner child process, just scan and exit.
+        if (te::PluginManager::startChildProcessPluginScan (commandLine))
+            return;
+
+        engine = std::make_unique<te::Engine> ("untitledstudio", std::make_unique<StudioUIBehaviour>(),
+                                               std::make_unique<StudioEngineBehaviour>());
         Effects::registerAll (*engine);
 
         // Dev aid: list every effect's parameters (used to write factory presets).

@@ -53,6 +53,9 @@ class Browser : public juce::Component
 public:
     static inline const juce::String dragPrefix = "file:";
     std::function<void (const juce::File&)> onOpenProject;
+    std::function<void (const juce::PluginDescription&)> onPluginChosen; // double-click a plugin
+
+    void refreshPlugins() { rebuild(); }
 
     Browser (te::Engine& e, juce::PropertiesFile& s) : engine (e), settings (s), preview (e)
     {
@@ -181,6 +184,98 @@ private:
         bool mightContainSubItems() override { return true; }
     };
 
+    // "Plugin database": Favorites / Instruments / Effects. Double-click to use, drag instruments to the rack.
+    struct PluginItem : public juce::TreeViewItem
+    {
+        PluginItem (Browser& b, juce::PluginDescription d) : browser (b), desc (std::move (d)) {}
+
+        bool mightContainSubItems() override { return false; }
+        int getItemHeight() const override   { return 22; }
+
+        void paintItem (juce::Graphics& g, int w, int h) override
+        {
+            if (isSelected())
+            {
+                g.setColour (Theme::accent.withAlpha (0.25f));
+                g.fillRect (0, 0, w, h);
+            }
+            g.setColour (Theme::textDim.brighter (0.3f));
+            g.setFont (Theme::font (13.0f));
+            g.drawText ((browser.isFavorite (desc) ? juce::String::fromUTF8 ("\xe2\x98\x85 ") : juce::String()) + desc.name,
+                        4, 0, w - 4, h, juce::Justification::centredLeft, true);
+        }
+
+        void itemDoubleClicked (const juce::MouseEvent&) override { if (browser.onPluginChosen) browser.onPluginChosen (desc); }
+
+        void itemClicked (const juce::MouseEvent& e) override
+        {
+            if (! e.mods.isPopupMenu())
+                return;
+            juce::PopupMenu m;
+            const bool fav = browser.isFavorite (desc);
+            m.addItem (fav ? "Remove from favorites" : "Add to favorites", [b = &browser, d = desc, fav] { b->setFavorite (d, ! fav); });
+            m.showMenuAsync ({});
+        }
+
+        juce::var getDragSourceDescription() override { return "plugin:" + desc.createIdentifierString(); }
+        juce::String getUniqueName() const override   { return desc.createIdentifierString(); }
+
+        Browser& browser;
+        juce::PluginDescription desc;
+    };
+
+    struct GroupItem : public juce::TreeViewItem
+    {
+        explicit GroupItem (juce::String n) : name (std::move (n)) {}
+        bool mightContainSubItems() override { return true; }
+        int getItemHeight() const override   { return 22; }
+        void paintItem (juce::Graphics& g, int w, int h) override
+        {
+            g.setColour (Theme::text);
+            g.setFont (Theme::font (13.0f, getParentItem() != nullptr && getParentItem()->getParentItem() == nullptr));
+            g.drawText (name, 4, 0, w - 4, h, juce::Justification::centredLeft, true);
+        }
+        void itemClicked (const juce::MouseEvent&) override { setOpen (! isOpen()); }
+        juce::String getUniqueName() const override { return name; }
+        juce::String name;
+    };
+
+    bool isFavorite (const juce::PluginDescription& d) const
+    {
+        return juce::StringArray::fromLines (settings.getValue ("pluginFavorites")).contains (d.createIdentifierString());
+    }
+
+    void setFavorite (const juce::PluginDescription& d, bool fav)
+    {
+        auto list = juce::StringArray::fromLines (settings.getValue ("pluginFavorites"));
+        if (fav) list.addIfNotAlreadyThere (d.createIdentifierString());
+        else     list.removeString (d.createIdentifierString());
+        list.removeEmptyStrings();
+        settings.setValue ("pluginFavorites", list.joinIntoString ("\n"));
+        rebuild();
+    }
+
+    juce::TreeViewItem* createPluginsGroup()
+    {
+        auto* group = new GroupItem ("Plugin database");
+        auto* favorites = new GroupItem ("Favorites");
+        auto* instruments = new GroupItem ("Instruments");
+        auto* effects = new GroupItem ("Effects");
+        auto types = engine.getPluginManager().knownPluginList.getTypes();
+        std::sort (types.begin(), types.end(), [] (auto& a, auto& b) { return a.name.compareIgnoreCase (b.name) < 0; });
+        for (auto& d : types)
+        {
+            (d.isInstrument ? instruments : effects)->addSubItem (new PluginItem (*this, d));
+            if (isFavorite (d))
+                favorites->addSubItem (new PluginItem (*this, d));
+        }
+        for (auto* g : { favorites, instruments, effects })
+            group->addSubItem (g);
+        return group;
+    }
+
+
+
     juce::StringArray getUserFolders() const
     {
         return juce::StringArray::fromLines (settings.getValue ("browserFolders").trim());
@@ -222,6 +317,7 @@ private:
         for (auto& path : getUserFolders())
             if (juce::File (path).isDirectory())
                 root->addSubItem (new Item (*this, juce::File (path)));
+        root->addSubItem (createPluginsGroup());
         tree.setRootItem (root.get());
         root->setOpen (true);
         if (auto* packs = root->getSubItem (0))
