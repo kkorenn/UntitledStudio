@@ -15,6 +15,7 @@ using namespace std::literals;
 #include "Playlist.h"
 #include "Mixer.h"
 #include "PluginWindow.h"
+#include "Exporter.h"
 
 //==============================================================================
 // FL "typing keyboard to piano": Z-row = lower octave, Q-row = upper octave.
@@ -344,6 +345,7 @@ public:
         if (cmd && code == 'S')                       { save (nullptr); return true; }
         if (cmd && (code == 'Y' || (code == 'Z' && mods.isShiftDown()))) { studio.undo().redo(); return true; }
         if (cmd && code == 'Z')                       { studio.undo().undo(); return true; }
+        if (cmd && code == 'R')                       { showExportDialog(); return true; }
         if (isFrontPanel (*pianoRollPanel) && pianoRoll->handleKey (key))
             return true;
         if (isFrontPanel (*playlistPanel) && playlist->handleKey (key))
@@ -386,6 +388,8 @@ public:
             m.addSeparator();
             m.addItem ("Save                    Ctrl+S", [this] { save (nullptr); });
             m.addItem ("Save as...        Ctrl+Shift+S", [this] { saveAs (nullptr); });
+            m.addSeparator();
+            m.addItem ("Export...                Ctrl+R", [this] { showExportDialog(); });
         }
         else if (index == 1)
         {
@@ -618,6 +622,18 @@ private:
             if (auto* c = workspace.getChildComponent (i); c->isVisible())
                 return c == &p;
         return false;
+    }
+
+    void showExportDialog()
+    {
+        juce::DialogWindow::LaunchOptions o;
+        o.content.setOwned (new Exporter::Dialog (studio, getProjectName()));
+        o.dialogTitle = "Export";
+        o.dialogBackgroundColour = Theme::panelDark;
+        o.escapeKeyTriggersCloseButton = true;
+        o.useNativeTitleBar = true;
+        o.resizable = false;
+        o.launchAsync();
     }
 
     void showRecordMenu()
@@ -1104,6 +1120,40 @@ namespace SelfTest
             ok &= check (s.harvestRecordedAudio() == 1 && s.getPlaylist().getNumChildren() == clipsBefore + 1,
                          "recorded audio becomes a playlist clip");
             ok &= check (rec->getClips().isEmpty(), "recorder track is emptied");
+        }
+
+        {
+            // Export: offline renders of mix, stems and MIDI.
+            const auto dir = juce::File::createTempFile ("export");
+            dir.createDirectory();
+            Exporter::Settings es;
+            es.song = false;
+            es.tailSeconds = 0.5;
+            const auto wav = dir.getChildFile ("mix.wav");
+            ok &= check (Exporter::exportMix (s, es, wav), "export WAV mixdown");
+            juce::AudioFormatManager formats;
+            formats.registerBasicFormats();
+            if (auto reader = std::unique_ptr<juce::AudioFormatReader> (formats.createReaderFor (wav)))
+            {
+                juce::AudioBuffer<float> buffer ((int) reader->numChannels, (int) reader->lengthInSamples);
+                reader->read (&buffer, 0, buffer.getNumSamples(), 0, true, true);
+                ok &= check (buffer.getMagnitude (0, buffer.getNumSamples()) > 0.01f, "mixdown contains audio");
+                ok &= check (std::abs ((double) reader->lengthInSamples / reader->sampleRate - (s.getPatternLengthBeats (s.getCurrentPatternState()) * 60.0 / s.getBpm() + 0.5)) < 0.1,
+                             "mixdown length = pattern + tail");
+            }
+            es.format = Exporter::Format::flac;
+            ok &= check (Exporter::exportMix (s, es, dir.getChildFile ("mix.flac")), "export FLAC");
+            es.format = Exporter::Format::ogg;
+            ok &= check (Exporter::exportMix (s, es, dir.getChildFile ("mix.ogg")), "export OGG");
+            if (Exporter::findLame().existsAsFile())
+            {
+                es.format = Exporter::Format::mp3;
+                ok &= check (Exporter::exportMix (s, es, dir.getChildFile ("mix.mp3")), "export MP3");
+            }
+            es.format = Exporter::Format::wav;
+            ok &= check (Exporter::exportStems (s, es, dir, "test") >= 2, "export stems");
+            ok &= check (Exporter::exportMidi (s, false, dir.getChildFile ("song.mid")), "export MIDI");
+            dir.deleteRecursively();
         }
 
         const auto file = juce::File::createTempFile (Studio::fileExtension);

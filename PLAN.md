@@ -246,11 +246,12 @@ Every effect has a themed window, bypass, factory presets (main ones) and user p
 **Done when:** record vocals over a beat and they line up perfectly.
 
 ## Phase 13 — Export
-- [ ] Render to WAV / MP3 / FLAC / OGG
-- [ ] Sample rate + bit depth options, dither
-- [ ] Export stems (each mixer track separately)
-- [ ] Export MIDI
-- [ ] Faster-than-realtime offline render
+- [x] Render to WAV / MP3 / FLAC / OGG (MP3 uses LAME: `brew install lame`)
+- [x] Sample rate + bit depth options, dither, normalize
+- [x] Export stems (each mixer insert separately)
+- [ ] Include send/bus effects in stems
+- [x] Export MIDI
+- [x] Faster-than-realtime offline render
 
 **Done when:** exported WAV sounds identical to playback.
 

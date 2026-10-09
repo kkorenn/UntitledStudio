@@ -101,6 +101,28 @@ struct StudioUIBehaviour : public te::UIBehaviour
         return {};
     }
 
+    // Renders (export) run here: progress window when the UI is up, plain loop when headless.
+    void runTaskWithProgressBar (te::ThreadPoolJobWithProgress& task) override
+    {
+        if (juce::TopLevelWindow::getNumTopLevelWindows() == 0)
+        {
+            while (task.runJob() == juce::ThreadPoolJob::jobNeedsRunningAgain) {}
+            return;
+        }
+
+        struct Runner : public juce::ThreadWithProgressWindow
+        {
+            explicit Runner (te::ThreadPoolJobWithProgress& t) : juce::ThreadWithProgressWindow (t.getJobName(), true, false), job (t) {}
+            void run() override
+            {
+                while (! threadShouldExit() && job.runJob() == juce::ThreadPoolJob::jobNeedsRunningAgain)
+                    setProgress (job.getCurrentTaskProgress());
+            }
+            te::ThreadPoolJobWithProgress& job;
+        } runner (task);
+        runner.runThread();
+    }
+
     void recreatePluginWindowContentAsync (te::Plugin& p) override
     {
         if (auto* w = dynamic_cast<PluginWindow*> (p.windowState->pluginWindow.get()))
