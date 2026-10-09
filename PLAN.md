@@ -75,10 +75,10 @@ Every feature, every phase:
 **Done when:** `cmake -B build && cmake --build build` compiles an empty JUCE app window.
 
 ## Phase 1 — First sound
-- [ ] JUCE `AudioAppComponent` app that plays a 440 Hz sine wave
-- [ ] Volume slider (via `std::atomic<float>`, no locks)
-- [ ] Audio device settings dialog (pick output, buffer size, sample rate)
-- [ ] Play / stop button
+- [x] JUCE `AudioAppComponent` app that plays a 440 Hz sine wave
+- [x] Volume slider (via `std::atomic<float>`, no locks)
+- [x] Audio device settings dialog (pick output, buffer size, sample rate)
+- [x] Play / stop button
 
 **Done when:** sine plays, volume slider is smooth with no clicks, changing buffer size works.
 
