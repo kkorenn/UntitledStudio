@@ -169,38 +169,46 @@ Every feature, every phase:
 **Done when:** route drums to bus with sidechain compression from kick, no phase/latency issues.
 
 ## Phase 9 — Built-in effects (stock plugins)
-Each effect gets a custom GUI + factory presets.
+Every effect has a themed window, bypass, factory presets (main ones) and user presets. EQ + Analyzer have custom visuals.
+186 Airwindows effects (MIT) are bundled under "More".
 
 **Core mixing**
-- [ ] Parametric EQ, 8 bands + spectrum analyzer (≈ Fruity Parametric EQ 2)
+- [x] Parametric EQ with draggable curve (4 bands)
+- [ ] 8 bands + live spectrum behind the curve (≈ Fruity Parametric EQ 2)
 - [ ] Graphic EQ
-- [ ] Compressor (≈ Fruity Compressor)
-- [ ] Multiband compressor / maximizer (≈ Maximus)
-- [ ] Limiter for master (≈ Fruity Limiter)
-- [ ] Gate / expander
-- [ ] De-esser
-- [ ] Transient shaper
-- [ ] Stereo tools: width, mid/side, pan law (≈ Stereo Shaper)
+- [x] Compressor (≈ Fruity Compressor)
+- [ ] Multiband compressor / maximizer (≈ Maximus) — needs custom DSP
+- [x] Bus Glue + Vari-Mu bus compressors
+- [x] Limiter for master (≈ Fruity Limiter)
+- [x] Gate
+- [x] De-esser
+- [x] Transient shaper
+- [x] Stereo tools: width, mid/side (≈ Stereo Shaper)
 
 **Space**
-- [ ] Algorithmic reverb (≈ Fruity Reeverb 2)
-- [ ] Convolution reverb + impulse responses (≈ Fruity Convolver)
-- [ ] Delay, tempo-synced, ping-pong (≈ Fruity Delay 3)
+- [x] Algorithmic reverb (≈ Fruity Reeverb 2) + Small Rooms
+- [x] Convolution reverb with generated room (≈ Fruity Convolver)
+- [ ] Load your own impulse response files
+- [x] Delay, Tape Delay, Echo
+- [ ] Tempo-synced + ping-pong delay (≈ Fruity Delay 3)
 
 **Color / creative**
-- [ ] Distortion / saturation / bitcrusher (≈ Fruity Blood Overdrive, Fast Dist)
-- [ ] Tape / analog warmth
-- [ ] Chorus, flanger, phaser
+- [x] Distortion / saturation / bitcrusher (≈ Fruity Blood Overdrive, Fast Dist)
+- [x] Tape / tube / vinyl warmth
+- [x] Chorus, ensemble, phaser, tremolo, vibrato
+- [ ] Flanger
+- [x] Filters (low/high-pass)
 - [ ] Filter with LFO + envelope (≈ Fruity Love Philter)
 - [ ] Volume/pitch/time gating effect, draw-your-own envelope (≈ Gross Beat)
 - [ ] Trance gate / stutter
-- [ ] One-knob "make it sound better" enhancer (≈ Soundgoodizer)
+- [x] Enhancer + Air (≈ Soundgoodizer-ish)
 - [ ] Vocoder (≈ Vocodex)
 - [ ] Pitch correction / autotune (≈ Pitcher, NewTone)
 - [ ] Formant shifter
 
 **Utility**
-- [ ] Spectrum analyzer, oscilloscope, loudness meter (LUFS)
+- [x] Spectrum analyzer + oscilloscope
+- [ ] Loudness meter (LUFS)
 - [ ] Tuner
 - [ ] Sidechain tool (volume ducking shape)
 

@@ -734,14 +734,19 @@ public:
 
     void debugOpenMixer()
     {
+        mixerPanel->show();
         studio.setChannelInsert (studio.getChannels().getChild (0)[IDs::id], 1);
-        if (auto p = studio.addEffect (1, te::CompressorPlugin::xmlTypeName)) openEffectWindow (*p);
+        if (auto p = studio.addEffect (1, te::EqualiserPlugin::xmlTypeName))
+        {
+            Presets::applyValues (*p, Presets::factory (p->getPluginType())[3].values);
+            openEffectWindow (*p);
+        }
         studio.addEffect (1, te::ReverbPlugin::xmlTypeName);
+        if (auto p = studio.addEffect (0, AnalyzerPlugin::xmlTypeName)) openEffectWindow (*p);
         studio.addSend (1, 2);
         channelRackPanel->setVisible (false);
-        mixerPanel->show();
-        if (auto* m = dynamic_cast<Mixer*> (&mixerPanel->getContent()))
-            juce::ignoreUnused (m);
+        if (effectPanels.size() > 1)
+            effectPanels[1]->setTopLeftPosition (700, 20);
     }
 
     void debugDemoSong()
@@ -891,6 +896,29 @@ namespace SelfTest
             s.setChannelInsert (kick, 3);
         }
 
+        {
+            // Every catalog effect loads; presets change parameters.
+            int created = 0;
+            for (auto& e : Effects::builtIn())
+                if (auto p = s.addEffect (6, e.xmlType))
+                {
+                    Effects::prepareNew (*p);
+                    ++created;
+                    s.removePlugin (*p);
+                }
+            ok &= check (created == (int) Effects::builtIn().size(), "all built-in effects can be created");
+
+            auto eq = s.addEffect (6, te::EqualiserPlugin::xmlTypeName);
+            Presets::applyValues (*eq, Presets::factory (eq->getPluginType())[1].values); // Bass boost
+            float lowGain = 0.0f;
+            for (auto* param : eq->getAutomatableParameters())
+                if (param->paramID == "Low-pass gain")
+                    lowGain = param->getCurrentValue();
+            ok &= check (std::abs (lowGain - 6.0f) < 0.01f, "factory preset applies");
+            s.removePlugin (*eq);
+            ok &= check (Effects::airwindows().size() > 150, "Airwindows library available");
+        }
+
         const auto file = juce::File::createTempFile (Studio::fileExtension);
         ok &= check (s.isDirty(), "edits mark project dirty");
         ok &= check (s.saveTo (file), "save project");
@@ -920,6 +948,24 @@ public:
     void initialise (const juce::String& commandLine) override
     {
         engine = std::make_unique<te::Engine> ("untitledstudio");
+        Effects::registerAll (*engine);
+
+        // Dev aid: list every effect's parameters (used to write factory presets).
+        if (commandLine.contains ("--dump-params"))
+        {
+            auto edit = te::Edit::createSingleTrackEdit (*engine);
+            for (auto& e : Effects::builtIn())
+                if (auto p = edit->getPluginCache().createNewPlugin (e.xmlType, {}))
+                {
+                    std::cout << e.name << " [" << e.xmlType << "]" << std::endl;
+                    for (auto* param : p->getAutomatableParameters())
+                        std::cout << "    " << param->paramID << " | " << param->getParameterName() << " | " << param->valueRange.start
+                                  << ".." << param->valueRange.end << " = " << param->getCurrentValue() << std::endl;
+                }
+            edit = nullptr;
+            quit();
+            return;
+        }
 
         if (commandLine.contains ("--selftest"))
         {

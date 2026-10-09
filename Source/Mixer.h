@@ -330,7 +330,10 @@ private:
                     Effects::showAddMenu (*this, [this, insert = mixer.selected] (const juce::String& type)
                     {
                         if (auto p = studio.addEffect (insert, type))
+                        {
+                            Effects::prepareNew (*p);
                             if (mixer.onOpenEffect) mixer.onOpenEffect (*p);
+                        }
                         refresh();
                     });
                     return;
