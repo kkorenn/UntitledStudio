@@ -333,6 +333,23 @@ Every effect has a themed window, bypass, factory presets (main ones) and user p
   - [ ] Check ASIO SDK license terms (Steinberg) before shipping
   - [ ] macOS doesn't need it (CoreAudio is already low-latency)
 
+## Phase 15b — FL Studio project import (.flp)
+> Read-only import. .flp is undocumented; use the community reverse-engineering (PyFLP, MIT) as format reference.
+> Never copy FL code or bundle FL plugins. Saving back to .flp is out of scope.
+- [ ] Collect real .flp test files (simple beat, full song w/ audio + automation, one with 3rd-party VSTs)
+- [ ] FLP reader: FLhd header + FLdt event stream (byte/word/dword/varint-length events)
+- [ ] Import tempo, time signature, project name
+- [ ] Import channels: names, volume, pan, sampler sample paths (warn if missing)
+- [ ] Import patterns + piano roll notes
+- [ ] Import playlist: pattern clips, audio clips, lanes
+- [ ] Import mixer: routing, levels, mute/solo
+- [ ] Third-party VST plugins: reload plugin + state if installed
+- [ ] FL native plugins (Sytrus, FLEX, Fruity effects...): replace with closest built-in, list in report
+- [ ] Automation clips (map FL parameters we understand)
+- [ ] Import report window ("Imported X channels, replaced Y plugins...")
+- [ ] Support FL 20 / 21 / 2024 format differences
+- [ ] FILE > Import FL Studio project... + drag .flp onto the window
+
 ## Phase 16 — Release
 - [ ] App icon, splash, about screen
 - [ ] macOS code signing + notarization (Apple Developer account, $99/yr)
