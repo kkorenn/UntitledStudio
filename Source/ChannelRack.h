@@ -32,7 +32,7 @@ public:
             dropFile (juce::File (files[i]), i == 0 ? juce::Point<int> (x, y) : juce::Point<int> (-1, -1));
     }
 
-    std::function<void (int channelId)> onOpenChannel;
+    std::function<void (int channelId)> onOpenChannel, onOpenPianoRoll;
 
     explicit ChannelRack (Studio& s) : studio (s)
     {
@@ -236,6 +236,7 @@ private:
         {
             const auto channel = studio.getChannel (channelId);
             juce::PopupMenu m;
+            m.addItem ("Piano roll", [this] { if (rack.onOpenPianoRoll) rack.onOpenPianoRoll (channelId); });
             m.addItem ("Rename...", [this] { rename(); });
             if (channel[IDs::type].toString() == ChannelType::sampler)
                 m.addItem ("Replace sample...", [this] { if (rack.onOpenChannel) rack.onOpenChannel (channelId); });

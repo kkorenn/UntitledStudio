@@ -128,14 +128,15 @@ Every feature, every phase:
 **Done when:** browse a sample folder, preview, drag into rack, play it from step sequencer.
 
 ## Phase 6 — Piano roll
-- [ ] Grid: pitch (vertical) × time (horizontal), zoom + scroll
-- [ ] Draw, delete, move, resize notes (mouse)
-- [ ] Select box, multi-select, copy/paste, duplicate (Ctrl+B like FL)
-- [ ] Snap to grid (1/4, 1/8, 1/16, triplets, none)
-- [ ] Velocity lane, pan lane
-- [ ] Quantize, humanize
-- [ ] Ghost notes (show notes from other channels)
-- [ ] Scale highlighting, chord stamp tool
+- [x] Grid: pitch (vertical) × time (horizontal), zoom + scroll
+- [x] Draw, delete, move, resize notes (mouse)
+- [x] Select box, multi-select, copy/paste, duplicate (Ctrl+B like FL)
+- [x] Snap to grid (1/4, 1/8, 1/16, triplets, none)
+- [x] Velocity lane
+- [ ] Pan lane
+- [x] Quantize, humanize
+- [x] Ghost notes (show notes from other channels)
+- [x] Scale highlighting, chord stamp tool
 - [ ] Slide/glide notes
 - [ ] Record MIDI keyboard into piano roll
 

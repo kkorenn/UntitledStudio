@@ -11,6 +11,7 @@ using namespace std::literals;
 #include "ChannelSettings.h"
 #include "ChannelRack.h"
 #include "Browser.h"
+#include "PianoRoll.h"
 
 //==============================================================================
 // FL "typing keyboard to piano": Z-row = lower octave, Q-row = upper octave.
@@ -18,6 +19,7 @@ class TypingKeyboard
 {
 public:
     std::function<void (const juce::MidiMessage&)> onMidi;
+    std::function<bool (int keyCode)> isReserved; // e.g. piano roll tool letters
 
     static int noteForKey (int keyCode)
     {
@@ -35,7 +37,7 @@ public:
         bool handled = false;
         for (auto& [code, note] : keys())
         {
-            const bool down = juce::KeyPress::isKeyCurrentlyDown (code);
+            const bool down = juce::KeyPress::isKeyCurrentlyDown (code) && ! (isReserved && isReserved (code));
             if (down != held[(size_t) note])
             {
                 held[(size_t) note] = down;
@@ -135,6 +137,10 @@ public:
         metronome.onClick = [this] { studio.setMetronome (metronome.getToggleState()); };
         addAndMakeVisible (metronome);
 
+        pianoRollButton.setTooltip ("Piano roll (F7)");
+        pianoRollButton.onClick = [this] { pianoRollPanel->toggle(); };
+        addAndMakeVisible (pianoRollButton);
+
         channelRackButton.setTooltip ("Channel rack (F6)");
         channelRackButton.onClick = [this] { channelRackPanel->toggle(); };
         addAndMakeVisible (channelRackButton);
@@ -149,11 +155,22 @@ public:
 
         auto rack = std::make_unique<ChannelRack> (studio);
         rack->onOpenChannel = [this] (int id) { toggleChannelWindow (id); };
+        rack->onOpenPianoRoll = [this] (int id) { studio.selectChannel (id); pianoRollPanel->show(); };
         channelRackPanel = std::make_unique<Panel> ("Channel rack", std::move (rack));
         workspace.addAndMakeVisible (*channelRackPanel);
         channelRackPanel->setBounds (40, 40, 620, 260);
 
+        auto roll = std::make_unique<PianoRoll> (studio);
+        pianoRoll = roll.get();
+        pianoRollPanel = std::make_unique<Panel> (roll->getTitle(), std::move (roll));
+        workspace.addChildComponent (*pianoRollPanel);
+        pianoRollPanel->setBounds (120, 150, 900, 520);
+
         typing.onMidi = [this] (const juce::MidiMessage& m) { studio.playLiveNote (m); };
+        typing.isReserved = [this] (int code)
+        {
+            return isFrontPanel (*pianoRollPanel) && juce::String ("pbdec").containsChar ((juce::juce_wchar) code);
+        };
 
         lastGeneration = studio.getEditGeneration();
         recent.setMaxNumberOfItems (10);
@@ -231,6 +248,8 @@ public:
         bar.removeFromLeft (20);
         channelRackButton.setBounds (bar.removeFromLeft (110));
         bar.removeFromLeft (4);
+        pianoRollButton.setBounds (bar.removeFromLeft (90));
+        bar.removeFromLeft (4);
         browserButton.setBounds (bar.removeFromLeft (80));
 
         browser.setVisible (browserVisible);
@@ -253,7 +272,10 @@ public:
         if (cmd && code == 'S')                       { save (nullptr); return true; }
         if (cmd && (code == 'Y' || (code == 'Z' && mods.isShiftDown()))) { studio.undo().redo(); return true; }
         if (cmd && code == 'Z')                       { studio.undo().undo(); return true; }
+        if (isFrontPanel (*pianoRollPanel) && pianoRoll->handleKey (key))
+            return true;
         if (key == juce::KeyPress::spaceKey)          { studio.togglePlay(); return true; }
+        if (key == juce::KeyPress::F7Key)             { pianoRollPanel->toggle(); return true; }
         if (key == juce::KeyPress::F6Key)             { channelRackPanel->toggle(); return true; }
         if (key == juce::KeyPress::F8Key && mods.isAltDown()) { toggleBrowser(); return true; }
         if (key == juce::KeyPress::F10Key)            { showAudioSettings(); return true; }
@@ -443,6 +465,16 @@ private:
         panel->toFront (false);
     }
 
+    bool isFrontPanel (const Panel& p) const
+    {
+        if (! p.isVisible())
+            return false;
+        for (int i = workspace.getNumChildComponents(); --i >= 0;)
+            if (auto* c = workspace.getChildComponent (i); c->isVisible())
+                return c == &p;
+        return false;
+    }
+
     void toggleBrowser()
     {
         browserVisible = ! browserVisible;
@@ -586,6 +618,14 @@ private:
 public:
     void requestQuit() { quitRequested(); }
     void debugOpenFirstChannel() { toggleChannelWindow (studio.getChannels().getChild (0)[IDs::id]); }
+    void debugOpenPianoRoll()
+    {
+        auto pattern = studio.getCurrentPatternState();
+        const int ch = studio.getSelectedChannel();
+        for (auto [start, key] : { std::pair { 0.0, 72 }, { 0.5, 75 }, { 1.0, 79 }, { 2.0, 77 }, { 3.0, 72 } })
+            studio.addNote (pattern, ch, start, 0.5, key, 70 + (int) (start * 15));
+        pianoRollPanel->show();
+    }
 
 private:
 
@@ -598,10 +638,11 @@ private:
     TransportButton recordButton { TransportButton::record, "Record (coming in Phase 12)" };
     Widgets::DragNumber tempo { 10.0, 522.0, 0.5 };
     Widgets::LedButton metronome { "Metronome", Theme::accent };
-    juce::TextButton channelRackButton { "Channel rack" }, browserButton { "Browser" };
+    juce::TextButton channelRackButton { "Channel rack" }, browserButton { "Browser" }, pianoRollButton { "Piano roll" };
 
     juce::Component workspace;
-    std::unique_ptr<Panel> channelRackPanel;
+    std::unique_ptr<Panel> channelRackPanel, pianoRollPanel;
+    PianoRoll* pianoRoll = nullptr;
     juce::OwnedArray<Panel> channelPanels;
 
     juce::Rectangle<int> hintArea, timeArea, cpuArea;
@@ -718,6 +759,10 @@ public:
         if (commandLine.contains ("--snapshot"))
         {
             const auto file = juce::File (commandLine.fromFirstOccurrenceOf ("--snapshot", false, false).trim().upToFirstOccurrenceOf (" ", false, false).unquoted());
+            if (commandLine.contains ("--open-pianoroll"))
+                if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
+                    mc->debugOpenPianoRoll();
+
             if (commandLine.contains ("--open-channel"))
                 if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
                     mc->debugOpenFirstChannel();

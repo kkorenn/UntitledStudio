@@ -294,19 +294,30 @@ public:
         auto existing = findStepNote (pattern, channelId, step);
 
         if (on && ! existing.isValid())
-        {
-            juce::ValueTree note (IDs::NOTE);
-            note.setProperty (IDs::channel, channelId, nullptr);
-            note.setProperty (IDs::start, step * stepBeats, nullptr);
-            note.setProperty (IDs::length, stepBeats, nullptr);
-            note.setProperty (IDs::key, defaultRootNote, nullptr);
-            note.setProperty (IDs::velocity, 100, nullptr);
-            pattern.appendChild (note, &undo());
-        }
+            addNote (pattern, channelId, step * stepBeats, stepBeats, defaultRootNote, 100);
         else if (! on && existing.isValid())
         {
             pattern.removeChild (existing, &undo());
         }
+    }
+
+    juce::ValueTree addNote (juce::ValueTree pattern, int channelId, double start, double length, int key, int velocity)
+    {
+        juce::ValueTree note (IDs::NOTE);
+        note.setProperty (IDs::channel, channelId, nullptr);
+        note.setProperty (IDs::start, juce::jmax (0.0, start), nullptr);
+        note.setProperty (IDs::length, juce::jmax (1.0 / 64.0, length), nullptr);
+        note.setProperty (IDs::key, juce::jlimit (0, 127, key), nullptr);
+        note.setProperty (IDs::velocity, juce::jlimit (1, 127, velocity), nullptr);
+        pattern.appendChild (note, &undo());
+        return note;
+    }
+
+    // Short audition when placing/clicking notes (FL plays the note you draw).
+    void previewNote (int key, int velocity = 100)
+    {
+        playLiveNote (juce::MidiMessage::noteOn (1, key, (juce::uint8) juce::jlimit (1, 127, velocity)));
+        juce::Timer::callAfterDelay (220, [this, key] { playLiveNote (juce::MidiMessage::noteOff (1, key)); });
     }
 
     double getSwing() const              { return studio[IDs::swing]; }
