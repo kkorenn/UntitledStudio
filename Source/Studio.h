@@ -2,6 +2,7 @@
 
 #include "DrumKit.h"
 #include "MultiSampler.h"
+#include "SynthPresets.h"
 
 namespace te = tracktion;
 
@@ -43,6 +44,7 @@ namespace ChannelType
     inline const juce::String automation = "automation"; // playlist automation clip type
     inline const juce::String instrument = "instrument"; // MultiSampler: SFZ / SoundFont / WAV / slicer
     inline const juce::String drumpad = "drumpad";       // MultiSampler with 16 pads
+    inline const juce::String fm = "fm";                 // our FM Synth
 }
 
 class Studio : private juce::ValueTree::Listener,
@@ -56,6 +58,7 @@ public:
     explicit Studio (te::Engine& e) : engine (e)
     {
         DrumKit::ensureDefaultKit();
+        DrumKit::ensureLibrary();
         MultiSampler::getInstrumentsFolder().createDirectory();
         setupMidiInputs();
         newProject();
@@ -91,7 +94,19 @@ public:
     //==========================================================================
     // Project
 
-    void newProject()
+    // FL's default template: Kick, Clap, Hat, Snare.
+    void newProject() { newProjectFromTemplate ("Basic beat"); }
+
+    static juce::StringArray getTemplateNames() { return { "Empty", "Basic beat", "Trap", "House", "Lo-fi" }; }
+
+    static juce::File getTemplatesFolder()
+    {
+        return juce::File::getSpecialLocation (juce::File::userMusicDirectory)
+                   .getChildFile ("untitledstudio").getChildFile ("Templates");
+    }
+
+    // Built-in templates are written in code; the result is a clean, untitled project.
+    void newProjectFromTemplate (const juce::String& name)
     {
         setEdit (te::createEmptyEdit (engine, engine.getTemporaryFileManager().getTempDirectory().getChildFile ("Untitled.tracktionedit")));
 
@@ -100,12 +115,60 @@ public:
 
         studio.setProperty (IDs::swing, 0.0, nullptr);
         ensureInserts();
-        const int pattern = addPattern ("Pattern 1");
-        setCurrentPattern (pattern);
+        const int patternId = addPattern ("Pattern 1");
+        setCurrentPattern (patternId);
+        auto pattern = getPattern (patternId);
 
-        // FL's default template: Kick, Clap, Hat, Snare.
-        for (auto name : { "Kick", "Clap", "Hat", "Snare" })
-            addSamplerChannel (DrumKit::getDrumsFolder().getChildFile (juce::String (name) + ".wav"));
+        auto sample = [this] (const char* file) { return addSamplerChannel (DrumKit::getDrumsFolder().getChildFile (juce::String (file) + ".wav")); };
+        auto steps = [this, &pattern] (int channel, std::initializer_list<int> list, int key = defaultRootNote, int velocity = 100)
+        {
+            for (int step : list)
+                addNote (pattern, channel, step * stepBeats, stepBeats, key, velocity);
+        };
+
+        if (name == "Trap")
+        {
+            setBpm (140.0);
+            const int kick = sample ("Kick"), sub = addPresetChannel ("808 Sub"), snare = sample ("Snare"), hat = sample ("Hat");
+            steps (kick, { 0, 10, 16, 19, 26 });
+            steps (snare, { 8, 24 });
+            for (int s = 0; s < 32; s += 2)
+                steps (hat, { s }, defaultRootNote, s % 4 == 0 ? 110 : 80);
+            steps (hat, { 13, 15, 29, 31 }, defaultRootNote, 70); // rolls
+            for (auto [start, length, key] : { std::tuple { 0, 10, 36 }, { 10, 6, 36 }, { 16, 3, 39 }, { 19, 7, 34 }, { 26, 6, 36 } })
+                addNote (pattern, sub, start * stepBeats, length * stepBeats, key, 110);
+        }
+        else if (name == "House")
+        {
+            setBpm (124.0);
+            const int kick = sample ("Kick"), clap = sample ("Clap"), hat = sample ("Hat"), open = sample ("Open Hat"), bass = addPresetChannel ("Saw Bass");
+            steps (kick, { 0, 4, 8, 12, 16, 20, 24, 28 });
+            steps (clap, { 4, 12, 20, 28 });
+            steps (open, { 2, 6, 10, 14, 18, 22, 26, 30 });
+            for (int s = 0; s < 32; ++s)
+                if (s % 4 != 2)
+                    steps (hat, { s }, defaultRootNote, s % 2 == 0 ? 90 : 60);
+            for (auto [step, key] : { std::pair { 2, 36 }, { 6, 36 }, { 10, 39 }, { 14, 36 }, { 18, 41 }, { 22, 41 }, { 26, 39 }, { 30, 34 } })
+                addNote (pattern, bass, step * stepBeats, 2 * stepBeats, key, 100);
+        }
+        else if (name == "Lo-fi")
+        {
+            setBpm (85.0);
+            studio.setProperty (IDs::swing, 0.5, nullptr);
+            const int kick = sample ("Kick"), snare = sample ("Snare"), hat = sample ("Hat"), keys = addPresetChannel ("E-Piano");
+            steps (kick, { 0, 7, 10, 16, 23, 26 });
+            steps (snare, { 4, 12, 20, 28 });
+            for (int s = 0; s < 32; s += 2)
+                steps (hat, { s }, defaultRootNote, s % 4 == 0 ? 90 : 65);
+            for (auto [bar, chord] : { std::pair { 0, std::array { 50, 53, 57, 60 } }, { 1, std::array { 48, 52, 55, 59 } } })
+                for (int key : chord)
+                    addNote (pattern, keys, bar * 4.0, 3.75, key, 80);
+        }
+        else if (name != "Empty")
+        {
+            for (auto file : { "Kick", "Clap", "Hat", "Snare" })
+                sample (file);
+        }
 
         projectFile = juce::File();
         finishLoading();
@@ -193,6 +256,28 @@ public:
         auto plugin = edit->getPluginCache().createNewPlugin (te::FourOscPlugin::xmlTypeName, {});
         track->pluginList.insertPlugin (plugin, 0, nullptr);
         return addChannelState (*track, ChannelType::synth, "Synth", {});
+    }
+
+    int addFmSynthChannel()
+    {
+        undo().beginNewTransaction ("Add channel");
+        auto track = createChannelTrack ("FM Synth");
+        track->pluginList.insertPlugin (edit->getPluginCache().createNewPlugin (FMSynthPlugin::xmlTypeName, {}), 0, nullptr);
+        return addChannelState (*track, ChannelType::fm, "FM Synth", {});
+    }
+
+    // FL users pick a sound, not an engine: makes the right synth channel with a factory preset.
+    int addPresetChannel (const juce::String& presetName)
+    {
+        const auto sound = Presets::findSynthSound (presetName);
+        if (! sound)
+            return 0;
+
+        const int id = sound->pluginType == FMSynthPlugin::xmlTypeName ? addFmSynthChannel() : addSynthChannel();
+        if (auto p = getInstrument (id))
+            Presets::apply (*p, *sound->preset);
+        renameChannel (id, presetName);
+        return id;
     }
 
     // Third-party instrument (VST3 / AU) as a channel.

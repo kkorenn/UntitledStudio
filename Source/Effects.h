@@ -20,6 +20,7 @@ namespace Effects
        #undef US_REGISTER_AIRWINDOWS
         pm.createBuiltInType<AnalyzerPlugin>();
         pm.createBuiltInType<MultiSamplerPlugin>();
+        pm.createBuiltInType<FMSynthPlugin>();
         pm.createBuiltInType<te::ImpulseResponsePlugin>();
     }
 
@@ -132,15 +133,15 @@ namespace Effects
 }
 
 //==============================================================================
-// Presets: a preset is a set of parameter values (by parameter ID).
-// Factory presets live here; user presets are XML files in ~/Music/untitledstudio/Presets/<effect>/.
+// Effect factory presets (synth presets are in SynthPresets.h).
+// User presets are XML files in ~/Music/untitledstudio/Presets/<plugin type>/.
 namespace Presets
 {
-    using Values = std::vector<std::pair<juce::String, float>>;
-    struct Preset { juce::String name; Values values; };
-
     inline const std::vector<Preset>& factory (const juce::String& type)
     {
+        if (isSynthType (type))
+            return synthFactory (type);
+
         static const std::map<juce::String, std::vector<Preset>> all {
             { te::EqualiserPlugin::xmlTypeName, {
                 { "Flat",         Values { { "Low-pass gain", 0 }, { "Mid gain 1", 0 }, { "Mid gain 2", 0 }, { "High-pass gain", 0 } } },
@@ -188,14 +189,6 @@ namespace Presets
         return it != all.end() ? it->second : none;
     }
 
-    inline void applyValues (te::Plugin& p, const Values& values)
-    {
-        for (auto& [id, value] : values)
-            for (auto* param : p.getAutomatableParameters())
-                if (param->paramID.equalsIgnoreCase (id) || param->getParameterName().equalsIgnoreCase (id))
-                    param->setParameter (value, juce::sendNotificationSync);
-    }
-
     inline juce::File folderFor (te::Plugin& p)
     {
         return juce::File::getSpecialLocation (juce::File::userMusicDirectory)
@@ -211,6 +204,13 @@ namespace Presets
             e->setAttribute ("id", param->paramID);
             e->setAttribute ("value", param->getCurrentValue());
         }
+        if (p.getPluginType() == te::FourOscPlugin::xmlTypeName)
+            for (auto& [id, def] : fourOscStateDefaults())
+            {
+                auto* e = xml.createNewChildElement ("PARAM");
+                e->setAttribute ("id", id);
+                e->setAttribute ("value", p.state.getProperty (id, def).toString());
+            }
         const auto file = folderFor (p).getChildFile (juce::File::createLegalFileName (name) + ".xml");
         file.getParentDirectory().createDirectory();
         xml.writeTo (file);
@@ -223,8 +223,53 @@ namespace Presets
             Values values;
             for (auto* e : xml->getChildIterator())
                 values.push_back ({ e->getStringAttribute ("id"), (float) e->getDoubleAttribute ("value") });
-            applyValues (p, values);
+            apply (p, { file.getFileNameWithoutExtension(), values });
         }
+    }
+
+    // Factory presets, the user's saved presets and "Save preset..." (effect and synth windows).
+    inline void showMenu (Studio& studio, te::Plugin::Ptr plugin, juce::Component& target)
+    {
+        juce::PopupMenu m;
+        juce::String category;
+        for (auto& preset : factory (plugin->getPluginType()))
+        {
+            if (preset.category != category)
+                m.addSectionHeader (category = preset.category);
+            m.addItem (preset.name, [&studio, plugin, preset]
+            {
+                studio.undo().beginNewTransaction ("Preset");
+                apply (*plugin, preset);
+            });
+        }
+
+        auto files = folderFor (*plugin).findChildFiles (juce::File::findFiles, false, "*.xml");
+        files.sort();
+        if (! files.isEmpty())
+        {
+            m.addSectionHeader ("User");
+            for (auto& f : files)
+                m.addItem (f.getFileNameWithoutExtension(), [&studio, plugin, f]
+                {
+                    studio.undo().beginNewTransaction ("Preset");
+                    loadUser (*plugin, f);
+                });
+        }
+
+        m.addSeparator();
+        m.addItem ("Save preset...", [plugin]
+        {
+            auto* w = new juce::AlertWindow ("Save preset", {}, juce::MessageBoxIconType::NoIcon);
+            w->addTextEditor ("name", "My preset");
+            w->addButton ("Save", 1, juce::KeyPress (juce::KeyPress::returnKey));
+            w->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+            w->enterModalState (true, juce::ModalCallbackFunction::create ([plugin, w] (int r)
+            {
+                if (r == 1 && w->getTextEditorContents ("name").isNotEmpty())
+                    saveUser (*plugin, w->getTextEditorContents ("name"));
+            }), true);
+        });
+        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (target));
     }
 }
 
@@ -489,44 +534,7 @@ public:
     }
 
 private:
-    void showPresetMenu()
-    {
-        juce::PopupMenu m;
-        for (auto& preset : Presets::factory (plugin->getPluginType()))
-            m.addItem (preset.name, [this, preset]
-            {
-                studio.undo().beginNewTransaction ("Preset");
-                Presets::applyValues (*plugin, preset.values);
-            });
-
-        auto files = Presets::folderFor (*plugin).findChildFiles (juce::File::findFiles, false, "*.xml");
-        files.sort();
-        if (! files.isEmpty())
-        {
-            m.addSeparator();
-            for (auto& f : files)
-                m.addItem (f.getFileNameWithoutExtension(), [this, f]
-                {
-                    studio.undo().beginNewTransaction ("Preset");
-                    Presets::loadUser (*plugin, f);
-                });
-        }
-
-        m.addSeparator();
-        m.addItem ("Save preset...", [this]
-        {
-            auto* w = new juce::AlertWindow ("Save preset", {}, juce::MessageBoxIconType::NoIcon);
-            w->addTextEditor ("name", "My preset");
-            w->addButton ("Save", 1, juce::KeyPress (juce::KeyPress::returnKey));
-            w->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
-            w->enterModalState (true, juce::ModalCallbackFunction::create ([this, w] (int r)
-            {
-                if (r == 1 && w->getTextEditorContents ("name").isNotEmpty())
-                    Presets::saveUser (*plugin, w->getTextEditorContents ("name"));
-            }), true);
-        });
-        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (presetButton));
-    }
+    void showPresetMenu() { Presets::showMenu (studio, plugin, presetButton); }
 
     void timerCallback() override { bypass.setToggleState (plugin->isEnabled(), juce::dontSendNotification); }
 

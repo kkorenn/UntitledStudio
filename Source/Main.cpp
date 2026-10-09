@@ -379,6 +379,19 @@ public:
         if (index == 0)
         {
             m.addItem ("New                     Ctrl+N", [this] { newProject(); });
+
+            juce::PopupMenu templates;
+            for (auto& name : Studio::getTemplateNames())
+                templates.addItem (name, [this, name] { maybeSave ([this, name] { studio.newProjectFromTemplate (name); }); });
+            auto userTemplates = Studio::getTemplatesFolder().findChildFiles (juce::File::findFiles, false, "*" + Studio::fileExtension);
+            userTemplates.sort();
+            if (! userTemplates.isEmpty())
+            {
+                templates.addSectionHeader ("My templates");
+                for (auto& f : userTemplates)
+                    templates.addItem (f.getFileNameWithoutExtension(), [this, f] { maybeSave ([this, f] { studio.load (f, true); }); });
+            }
+            m.addSubMenu ("New from template", templates);
             m.addItem ("Open...                 Ctrl+O", [this] { openProject(); });
 
             juce::PopupMenu recentMenu;
@@ -388,6 +401,7 @@ public:
             m.addSeparator();
             m.addItem ("Save                    Ctrl+S", [this] { save (nullptr); });
             m.addItem ("Save as...        Ctrl+Shift+S", [this] { saveAs (nullptr); });
+            m.addItem ("Save as template...", [this] { saveAsTemplate(); });
             m.addSeparator();
             m.addItem ("Export...                Ctrl+R", [this] { showExportDialog(); });
         }
@@ -484,6 +498,20 @@ public:
                                   writeProject (fc.getResult().withFileExtension (Studio::fileExtension));
                                   if (then) then();
                               });
+    }
+
+    void saveAsTemplate()
+    {
+        auto* w = new juce::AlertWindow ("Save as template", "Name it; it shows up in FILE > New from template.", juce::MessageBoxIconType::NoIcon);
+        w->addTextEditor ("name", "My template");
+        w->addButton ("Save", 1, juce::KeyPress (juce::KeyPress::returnKey));
+        w->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+        w->enterModalState (true, juce::ModalCallbackFunction::create ([this, w] (int r)
+        {
+            const auto name = juce::File::createLegalFileName (w->getTextEditorContents ("name").trim());
+            if (r == 1 && name.isNotEmpty())
+                studio.saveCopyTo (Studio::getTemplatesFolder().getChildFile (name + Studio::fileExtension));
+        }), true);
     }
 
     void writeProject (const juce::File& file)
@@ -848,6 +876,9 @@ public:
     void requestQuit() { quitRequested(); }
     void debugOpenFirstChannel() { toggleChannelWindow (studio.getChannels().getChild (0)[IDs::id]); }
     void debugOpenDrumPad()      { toggleChannelWindow (studio.addDrumPadChannel()); }
+    void debugTemplate (const juce::String& name) { studio.newProjectFromTemplate (name); }
+    void debugOpenFm()           { toggleChannelWindow (studio.addPresetChannel ("E-Piano")); }
+    void debugOpenSynth()        { toggleChannelWindow (studio.addPresetChannel ("Acid Bass")); }
     void debugOpenInstrument()   { toggleChannelWindow (studio.addInstrumentChannel (DrumKit::getDrumsFolder().getChildFile ("808.wav"))); }
     void debugOpenPianoRoll()
     {
@@ -1307,6 +1338,180 @@ namespace SelfTest
             ok &= check (s.getCurrentPatternState().getNumChildren() == notesBefore + slices, "slicer writes one pattern note per slice");
         }
 
+        int fmChannel = 0;
+        {
+            // Phase 14 synths, presets, templates, sound library.
+            juce::AudioFormatManager formats;
+            formats.registerBasicFormats();
+            const auto tmp = juce::File::createTempFile ("synths");
+            tmp.createDirectory();
+
+            auto renderPeak = [&] (Studio& st, int channel)
+            {
+                Exporter::Settings es;
+                es.song = false;
+                es.tailSeconds = 0.3;
+                const auto wav = tmp.getChildFile ("synth.wav");
+                Exporter::render (st, es, wav, { st.getTrack (channel) }, false);
+                float peak = 0.0f, rms = 0.0f;
+                if (auto reader = std::unique_ptr<juce::AudioFormatReader> (formats.createReaderFor (wav)))
+                {
+                    juce::AudioBuffer<float> buffer ((int) reader->numChannels, (int) reader->lengthInSamples);
+                    reader->read (&buffer, 0, buffer.getNumSamples(), 0, true, true);
+                    peak = buffer.getMagnitude (0, buffer.getNumSamples());
+                    rms = buffer.getRMSLevel (0, 0, buffer.getNumSamples());
+                }
+                return std::pair { peak, rms };
+            };
+            auto paramValue = [] (te::Plugin* p, const juce::String& id)
+            {
+                for (auto* param : p->getAutomatableParameters())
+                    if (param->paramID == id)
+                        return param->getCurrentValue();
+                return -12345.0f;
+            };
+
+            Studio t (engine);
+            t.newProjectFromTemplate ("Empty");
+            const int fm = t.addFmSynthChannel();
+            auto* fmPlugin = dynamic_cast<FMSynthPlugin*> (t.getInstrument (fm));
+            ok &= check (fmPlugin != nullptr && t.getChannel (fm)[IDs::type].toString() == ChannelType::fm, "FM Synth channel");
+            t.addNote (t.getCurrentPatternState(), fm, 0.0, 1.0, 60, 100);
+            t.addNote (t.getCurrentPatternState(), fm, 1.0, 1.0, 67, 100);
+            ok &= check (renderPeak (t, fm).first > 0.05f, "FM Synth renders audio offline");
+
+            if (fmPlugin != nullptr)
+            {
+                for (int op = 0; op < FM::numOps; ++op)
+                    fmPlugin->getParam (op * FM::numOpParams + FM::level)->setParameter (0.5f, juce::sendNotificationSync);
+                juce::Array<float> levels;
+                for (int a = 0; a < FM::numAlgorithms; ++a)
+                {
+                    fmPlugin->getParam (FM::algorithm)->setParameter ((float) a, juce::sendNotificationSync);
+                    levels.add (renderPeak (t, fm).second);
+                }
+                bool allSound = true, allDiffer = true;
+                for (int a = 0; a < levels.size(); ++a)
+                {
+                    allSound &= levels[a] > 0.005f;
+                    if (a > 0) allDiffer &= std::abs (levels[a] - levels[0]) > 1.0e-4f;
+                }
+                ok &= check (allSound, "every FM algorithm renders audio");
+                ok &= check (allDiffer, "FM algorithms sound different");
+            }
+
+            // Factory presets: enough of them, and every value hits a real parameter (or 4-OSC state).
+            for (auto type : { te::FourOscPlugin::xmlTypeName, FMSynthPlugin::xmlTypeName })
+            {
+                const int ch = juce::String (type) == FMSynthPlugin::xmlTypeName ? t.addFmSynthChannel() : t.addSynthChannel();
+                auto* plugin = t.getInstrument (ch);
+                bool valid = true;
+                for (auto& preset : Presets::synthFactory (type))
+                    for (auto& [id, v] : preset.values)
+                    {
+                        bool isParam = false;
+                        for (auto* param : plugin->getAutomatableParameters())
+                            isParam |= param->paramID == id;
+                        bool isState = false;
+                        for (auto& [stateId, def] : Presets::fourOscStateDefaults())
+                            isState |= juce::String (type) == te::FourOscPlugin::xmlTypeName && stateId == id;
+                        if (! isParam && ! isState)
+                        {
+                            std::cout << "        unknown preset value " << preset.name << ": " << id << std::endl;
+                            valid = false;
+                        }
+                    }
+                ok &= check (Presets::synthFactory (type).size() >= 12 && valid, juce::String (type) + ": " + juce::String ((int) Presets::synthFactory (type).size())
+                                                                                     + " factory presets, all values valid");
+            }
+
+            {
+                const int synth = t.addSynthChannel();
+                auto* osc = t.getInstrument (synth);
+                Presets::apply (*osc, *Presets::findSynthSound ("Acid Bass")->preset);
+                const bool acid = (int) osc->state["filterType"] == 1 && std::abs (paramValue (osc, "filterResonance") - 78.0f) < 0.01f;
+                Presets::apply (*osc, *Presets::findSynthSound ("Soft Pad")->preset);
+                ok &= check (acid && std::abs (paramValue (osc, "ampAttack") - 1.2f) < 0.01f && std::abs (paramValue (osc, "filterResonance") - 0.5f) < 0.01f
+                                 && (int) osc->state["voices1"] == 4,
+                             "4-OSC preset changes parameters + state, resets the rest");
+                Presets::apply (*fmPlugin, *Presets::findSynthSound ("FM Bell")->preset);
+                const bool bell = std::abs (paramValue (fmPlugin, "op2Ratio") - 3.5f) < 0.01f;
+                Presets::apply (*fmPlugin, *Presets::findSynthSound ("E-Piano")->preset);
+                ok &= check (bell && std::abs (paramValue (fmPlugin, "op4Ratio") - 14.0f) < 0.01f && std::abs (paramValue (fmPlugin, "op2Ratio") - 1.0f) < 0.01f,
+                             "FM preset changes parameters");
+            }
+
+            {
+                const int before = t.getChannels().getNumChildren();
+                const int acid = t.addPresetChannel ("Acid Bass");
+                auto* p = t.getInstrument (acid);
+                ok &= check (p != nullptr && p->getPluginType() == te::FourOscPlugin::xmlTypeName && t.getChannel (acid)[IDs::name].toString() == "Acid Bass"
+                                 && (int) p->state["filterType"] == 1 && std::abs (paramValue (p, "filterFreq") - 48.0f) < 0.01f,
+                             "Synth presets: 'Acid Bass' makes a named 4-OSC channel with the preset");
+                const int keys = t.addPresetChannel ("E-Piano");
+                ok &= check (t.getChannel (keys)[IDs::type].toString() == ChannelType::fm && std::abs (paramValue (t.getInstrument (keys), "op4Ratio") - 14.0f) < 0.01f,
+                             "Synth presets: 'E-Piano' makes an FM channel");
+                t.undo().undo();
+                ok &= check (t.getChannels().getNumChildren() == before + 1, "preset channel is one undo step");
+                t.addNote (t.getCurrentPatternState(), acid, 0.0, 0.5, 36, 110);
+                ok &= check (renderPeak (t, acid).first > 0.05f, "preset channel renders audio");
+            }
+
+            // Templates
+            struct Expect { const char* name; double bpm; int channels; bool notes; };
+            for (auto e : { Expect { "Empty", 120.0, 0, false }, Expect { "Basic beat", 120.0, 4, false }, Expect { "Trap", 140.0, 4, true },
+                            Expect { "House", 124.0, 5, true }, Expect { "Lo-fi", 85.0, 4, true } })
+            {
+                t.newProjectFromTemplate (e.name);
+                int notes = 0;
+                for (auto p : t.getPatterns()) notes += p.getNumChildren();
+                ok &= check (std::abs (t.getBpm() - e.bpm) < 1.0e-6 && t.getChannels().getNumChildren() == e.channels && (notes > 0) == e.notes
+                                 && ! t.isDirty() && ! t.undo().canUndo(),
+                             juce::String ("template '") + e.name + "': " + juce::String (t.getBpm()) + " BPM, " + juce::String (t.getChannels().getNumChildren())
+                                 + " channels, " + juce::String (notes) + " notes, clean");
+            }
+            ok &= check (t.getSwing() > 0.0, "Lo-fi template swings");
+            {
+                Exporter::Settings es;
+                es.song = false;
+                es.tailSeconds = 0.3;
+                t.newProjectFromTemplate ("Trap");
+                const auto wav = tmp.getChildFile ("trap.wav");
+                float sub = 0.0f;
+                for (auto ch : t.getChannels())
+                    if (ch[IDs::name].toString() == "808 Sub")
+                        sub = renderPeak (t, ch[IDs::id]).first;
+                ok &= check (sub > 0.05f && Exporter::exportMix (t, es, wav), "Trap template renders (808 sub synth sounds)");
+            }
+
+            // Sound library (generated into a temp folder so we can time it).
+            const auto packs = tmp.getChildFile ("Packs");
+            const auto start = juce::Time::getMillisecondCounterHiRes();
+            DrumKit::ensureLibrary (packs);
+            const auto ms = juce::Time::getMillisecondCounterHiRes() - start;
+            int valid = 0;
+            for (auto& e : DrumKit::Library::entries())
+                if (auto reader = std::unique_ptr<juce::AudioFormatReader> (formats.createReaderFor (packs.getChildFile (e.path))))
+                {
+                    juce::AudioBuffer<float> buffer ((int) reader->numChannels, (int) reader->lengthInSamples);
+                    reader->read (&buffer, 0, buffer.getNumSamples(), 0, true, true);
+                    valid += buffer.getNumSamples() > 1000 && buffer.getMagnitude (0, buffer.getNumSamples()) > 0.05f ? 1 : 0;
+                }
+            ok &= check (valid == (int) DrumKit::Library::entries().size(),
+                         "sound library: " + juce::String (valid) + " valid files generated in " + juce::String ((int) ms) + " ms");
+            const auto modified = packs.getChildFile ("FX/Impact.wav").getLastModificationTime();
+            DrumKit::ensureLibrary (packs);
+            ok &= check (packs.getChildFile ("FX/Impact.wav").getLastModificationTime() == modified, "sound library doesn't regenerate existing files");
+            bool installed = true;
+            for (auto& e : DrumKit::Library::entries())
+                installed &= DrumKit::getPacksFolder().getChildFile (e.path).existsAsFile();
+            ok &= check (installed && DrumKit::getPacksFolder().getChildFile ("Loops/Drum Loop 120 BPM.wav").existsAsFile(), "sound library installed in Packs");
+            tmp.deleteRecursively();
+
+            // FM channel for the save/load checks below.
+            fmChannel = s.addPresetChannel ("FM Bell");
+        }
+
         const auto file = juce::File::createTempFile (Studio::fileExtension);
         s.setSongMode (false);
         const int savedChannels = s.getChannels().getNumChildren();
@@ -1326,6 +1531,17 @@ namespace SelfTest
                                  && loaded.getMultiSampler (id)->getInfo().numRegions == s.getMultiSampler (id)->getInfo().numRegions
                                  && loaded.getMultiSampler (id)->getProgram() == s.getMultiSampler (id)->getProgram(),
                                  "instrument channel survives save/load (" + loaded.getChannel (id)[IDs::name].toString() + ")");
+            ok &= check (dynamic_cast<FMSynthPlugin*> (loaded.getInstrument (fmChannel)) != nullptr, "FM Synth plugin restored from the project");
+            if (auto* a = dynamic_cast<FMSynthPlugin*> (s.getInstrument (fmChannel)))
+                if (auto* b = dynamic_cast<FMSynthPlugin*> (loaded.getInstrument (fmChannel)))
+                {
+                    bool same = true;
+                    for (int i = 0; i < FM::numParams; ++i)
+                        same &= std::abs (a->getParam (i)->getCurrentValue() - b->getParam (i)->getCurrentValue()) < 1.0e-5f;
+                    ok &= check (same && std::abs (b->getParam (FM::numOpParams + FM::ratio)->getCurrentValue() - 3.5f) < 1.0e-5f
+                                     && loaded.getChannel (fmChannel)[IDs::type].toString() == ChannelType::fm,
+                                 "FM Synth channel survives save/load with its parameters");
+                }
             loaded.setStep (kick, 2, true);
             ok &= check (countNotes (loaded, kick) == savedNotes + 1, "loaded project still drives the engine");
         }
@@ -1357,7 +1573,10 @@ public:
         if (commandLine.contains ("--dump-params"))
         {
             auto edit = te::Edit::createSingleTrackEdit (*engine);
-            for (auto& e : Effects::builtIn())
+            auto all = Effects::builtIn();
+            all.push_back ({ "4-OSC Synth", te::FourOscPlugin::xmlTypeName, "Synth", {} });
+            all.push_back ({ "FM Synth", FMSynthPlugin::xmlTypeName, "Synth", {} });
+            for (auto& e : all)
                 if (auto p = edit->getPluginCache().createNewPlugin (e.xmlType, {}))
                 {
                     std::cout << e.name << " [" << e.xmlType << "]" << std::endl;
@@ -1399,6 +1618,18 @@ public:
             if (commandLine.contains ("--open-drumpad"))
                 if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
                     mc->debugOpenDrumPad();
+
+            if (commandLine.contains ("--template "))
+                if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
+                    mc->debugTemplate (commandLine.fromFirstOccurrenceOf ("--template ", false, false).upToFirstOccurrenceOf (" --", false, false).unquoted());
+
+            if (commandLine.contains ("--open-fm"))
+                if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
+                    mc->debugOpenFm();
+
+            if (commandLine.contains ("--open-synth"))
+                if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
+                    mc->debugOpenSynth();
 
             if (commandLine.contains ("--open-instrument"))
                 if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))

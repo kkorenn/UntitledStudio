@@ -393,11 +393,20 @@ private:
             studio.selectChannel (id);
             if (onOpenChannel) onOpenChannel (id);
         });
-        m.addItem ("4-OSC Synth", [this]
+        m.addItem ("4-OSC Synth", [this] { openNew (studio.addSynthChannel()); });
+        m.addItem ("FM Synth", [this] { openNew (studio.addFmSynthChannel()); });
+
+        // FL users pick a sound, not an engine.
+        juce::PopupMenu sounds;
+        const auto all = Presets::allSynthSounds();
+        for (auto& category : Presets::synthCategories())
         {
-            const int id = studio.addSynthChannel();
-            studio.selectChannel (id);
-        });
+            sounds.addSectionHeader (category);
+            for (auto& sound : all)
+                if (sound.preset->category == category)
+                    sounds.addItem (sound.preset->name, [this, name = sound.preset->name] { openNew (studio.addPresetChannel (name)); });
+        }
+        m.addSubMenu ("Synth presets", sounds);
         m.addItem ("Instrument (SFZ / SoundFont)...", [this]
         {
             chooseFile ("Choose an instrument", "*.sfz;*.sf2", [this] (const juce::File& f) { return studio.addInstrumentChannel (f); });

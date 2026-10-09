@@ -281,14 +281,14 @@ Every effect has a themed window, bypass, factory presets (main ones) and user p
 - [ ] World instruments (koto, sitar, kalimba…)
 
 ### 14c — Built-in synths
-- [ ] Simple 3-oscillator synth (≈ 3xOsc) — upgrade of Phase 2
-- [ ] Wavetable synth: 2–3 osc, unison, mod matrix, LFOs, filters (≈ Vital/Serum-lite)
-- [ ] FM synth (≈ Sytrus)
-- [ ] 303-style bass synth (≈ Transistor Bass)
-- [ ] 808 / sub-bass instrument with glide + distortion
-- [ ] Supersaw / trance lead synth
-- [ ] Pad synth (≈ GMS)
-- [ ] Granular synth
+- [x] Simple 3-oscillator synth (≈ 3xOsc) — Tracktion's 4-OSC engine as the "4-OSC Synth" channel + 13 factory presets (Presets button in its channel window). Generic knob grid, no custom UI yet.
+- [ ] Wavetable synth: 2–3 osc, unison, mod matrix, LFOs, filters (≈ Vital/Serum-lite) — not started
+- [x] FM synth (≈ Sytrus) — own "FM Synth" (`Source/FMSynth.h`): 4 operators (ratio/fine/level/ADSR), feedback on op 4, 8 algorithms with a diagram, 16 voices + stealing, velocity, pitch bend ±2, sustain pedal, resonant low-pass, 13 presets. No LFOs/mod matrix, no oversampling.
+- [x] 303-style bass synth (≈ Transistor Bass) — only as the "Acid Bass" 4-OSC preset (saw, 24 dB resonant filter env, legato slide). No accent/step sequencer.
+- [x] 808 / sub-bass instrument with glide + distortion — "808 Sub" 4-OSC preset (sine, legato glide, distortion) + generated 808 samples. No pitch-drop envelope.
+- [x] Supersaw / trance lead synth — "Supersaw Lead" 4-OSC preset (2×8 unison saws, reverb/delay)
+- [x] Pad synth (≈ GMS) — "Soft Pad" / "String Pad" (4-OSC) and "Glass Pad" (FM) presets, not a dedicated engine
+- [ ] Granular synth — not started
 
 ### 14d — Drums
 - [x] Drum pad instrument, 16 pads, velocity, choke groups (≈ FPC) — "Drum pad" channel, notes 36..51, default kit, closed hat chokes open hat, click pad to play, drop a sample on a pad to replace it
@@ -296,10 +296,10 @@ Every effect has a themed window, bypass, factory presets (main ones) and user p
 - [x] Slicer: chop loops to pads/notes (≈ Fruity Slicer / Slicex) — energy-flux onset detection (8 equal slices fallback), slices on keys from C5, writes a pattern that replays the loop. No slice editing UI yet.
 
 ### 14e — Sound library (content, not code)
-- [ ] Drum kits: trap, hip-hop, house, techno, lo-fi, rock, acoustic
-- [ ] One-shots: 808s, kicks, snares, claps, hats, percs, FX, risers, impacts
-- [ ] Loops: drum, melody, bass, vocal (tagged with BPM + key)
-- [ ] Synth presets: 50+ per synth (bass, lead, pad, pluck, keys, FX)
+- [ ] Drum kits: trap, hip-hop, house, techno, lo-fi, rock, acoustic — only one generated electronic kit (Packs/Drums, 24 sounds); no genre kits or recorded acoustic drums
+- [x] One-shots: 808s, kicks, snares, claps, hats, percs, FX, risers, impacts — all synthesised on first launch (`DrumKit::ensureLibrary`): 3 extra kicks, 2 snares, 2 claps, shaker, 3 toms, crash, ride, perc, cowbell, 2 more 808s; FX: riser, downlifter, impact, noise sweep
+- [ ] Loops: drum, melody, bass, vocal (tagged with BPM + key) — 3 generated drum loops with BPM in the filename (120/124/140); no melody/bass/vocal loops, no key tags
+- [ ] Synth presets: 50+ per synth (bass, lead, pad, pluck, keys, FX) — 13 per synth so far (4-OSC + FM), also in the channel rack "+" > Synth presets menu
 - [ ] Effect presets + mixer chain presets
 - [ ] Demo projects showing off features
 - [ ] Browser: tags, search, favorites, auto BPM/key detection, preview in tempo
@@ -310,7 +310,7 @@ Every effect has a themed window, bypass, factory presets (main ones) and user p
 - [ ] Preset browser + tags + search (shared by all plugins)
 - [ ] Tempo + time-signature changes over the song
 - [ ] Performance / live mode (clip launching)
-- [ ] Project templates (trap, house, lo-fi…)
+- [x] Project templates (trap, house, lo-fi…) — FILE > New from template: Empty, Basic beat (default), Trap 140, House 124, Lo-fi 85 + swing; "Save as template..." → ~/Music/untitledstudio/Templates
 - [ ] Arpeggiator + chord generator (MIDI effects)
 
 **Done when:** make a full song using ONLY built-in instruments, sounds & effects — no 3rd-party plugins.

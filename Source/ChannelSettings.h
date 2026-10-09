@@ -3,6 +3,7 @@
 #include "PluginEditor.h"
 #include "Studio.h"
 #include "ParamKnob.h"
+#include "Effects.h"
 
 // FL note names: MIDI 60 = C5.
 inline juce::String noteName (int note) { return juce::MidiMessage::getMidiNoteName (note, true, true, 5); }
@@ -501,6 +502,163 @@ private:
     std::unique_ptr<DrumPadGrid> pads;
 };
 
+// FM Synth controls: algorithm picker + diagram, one knob row per operator, global row.
+class FMSynthView : public juce::Component, private juce::Timer
+{
+public:
+    FMSynthView (Studio& s, FMSynthPlugin& p) : studio (s), plugin (&p)
+    {
+        for (int i = 0; i < FM::numParams; ++i)
+        {
+            if (i == FM::algorithm)
+                continue;
+            knobs[(size_t) i].bind (studio, plugin->getParam (i));
+            addAndMakeVisible (knobs[(size_t) i]);
+        }
+
+        for (int a = 0; a < FM::numAlgorithms; ++a)
+            algorithm.addItem (juce::String (a + 1) + ": " + FM::algorithms()[(size_t) a].name, a + 1);
+        algorithm.setTooltip ("Algorithm: how the 4 operators modulate each other (bottom row = heard, upper ops modulate the ones below)");
+        algorithm.onChange = [this]
+        {
+            auto* param = plugin->getParam (FM::algorithm);
+            if (algorithm.getSelectedItemIndex() >= 0 && algorithm.getSelectedItemIndex() != currentAlgorithm())
+            {
+                studio.undo().beginNewTransaction ("Algorithm");
+                param->setParameter ((float) algorithm.getSelectedItemIndex(), juce::sendNotificationSync);
+                studio.userChangedParam (*param);
+                repaint();
+            }
+        };
+        addAndMakeVisible (algorithm);
+        sync();
+        startTimerHz (10);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.fillAll (Theme::panelDark);
+        g.setFont (Theme::font (11.0f));
+        g.setColour (Theme::textDim);
+        const char* columns[] = { "RATIO", "FINE", "LEVEL", "ATTACK", "DECAY", "SUSTAIN", "RELEASE" };
+        for (int c = 0; c < FM::numOpParams; ++c)
+            g.drawText (columns[c], knobs[(size_t) c].getBounds().withY (knobs[0].getY() - 16).withHeight (14).expanded (8, 0), juce::Justification::centred);
+
+        const auto& alg = FM::algorithms()[(size_t) currentAlgorithm()];
+        for (int op = 0; op < FM::numOps; ++op)
+        {
+            const auto k = knobs[(size_t) (op * FM::numOpParams)].getBounds();
+            const bool carrier = alg.carriers & (1 << op);
+            g.setColour (carrier ? Theme::accent : Theme::text);
+            g.setFont (Theme::font (12.0f, true));
+            g.drawText ("OP " + juce::String (op + 1), k.withX (10).withWidth (50), juce::Justification::centredLeft);
+            g.setFont (Theme::font (10.0f));
+            g.setColour (Theme::textDim);
+            g.drawText (carrier ? "carrier" : (op == 3 ? "mod + fb" : "modulator"), k.withX (10).withWidth (60).translated (0, 14), juce::Justification::centredLeft);
+        }
+
+        const char* globals[] = { "FEEDBACK", "CUTOFF", "RESONANCE", "VELOCITY", "VOLUME" };
+        for (int i = 0; i < 5; ++i)
+            g.drawText (globals[i], knobs[(size_t) (FM::feedback + i)].getBounds().withY (knobs[(size_t) FM::feedback].getY() - 16).withHeight (14).expanded (10, 0),
+                        juce::Justification::centred);
+
+        paintDiagram (g, diagramArea.toFloat(), alg);
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (10);
+        diagramArea = r.removeFromRight (150);
+        algorithm.setBounds (diagramArea.removeFromTop (24));
+        diagramArea.removeFromTop (6);
+        diagramArea = diagramArea.withHeight (juce::jmin (diagramArea.getHeight(), 200));
+
+        r.removeFromTop (16);
+        for (int op = 0; op < FM::numOps; ++op)
+        {
+            auto row = r.removeFromTop (50);
+            row.removeFromLeft (64);
+            for (int c = 0; c < FM::numOpParams; ++c)
+                knobs[(size_t) (op * FM::numOpParams + c)].setBounds (row.removeFromLeft (54).reduced (5, 2));
+        }
+        r.removeFromTop (22);
+        auto row = r.removeFromTop (50);
+        row.removeFromLeft (64);
+        for (int i = FM::feedback; i < FM::numParams; ++i)
+            knobs[(size_t) i].setBounds (row.removeFromLeft (70).reduced (12, 2));
+    }
+
+private:
+    int currentAlgorithm() const { return juce::jlimit (0, FM::numAlgorithms - 1, juce::roundToInt (plugin->getParam (FM::algorithm)->getCurrentValue())); }
+
+    // Boxes per op: carriers on the bottom row; a modulator sits one row above its highest target.
+    static void paintDiagram (juce::Graphics& g, juce::Rectangle<float> area, const FM::Algorithm& alg)
+    {
+        g.setColour (Theme::lcd);
+        g.fillRoundedRectangle (area, 4.0f);
+
+        std::array<int, FM::numOps> row {};
+        for (int op = 0; op < FM::numOps; ++op)
+            for (int target = 0; target < op; ++target)
+                if (alg.mods[(size_t) target] & (1 << op))
+                    row[(size_t) op] = juce::jmax (row[(size_t) op], row[(size_t) target] + 1);
+
+        const int rows = 1 + *std::max_element (row.begin(), row.end());
+        std::array<juce::Rectangle<float>, FM::numOps> boxes;
+        const float cellH = area.getHeight() / (float) juce::jmax (rows, 1);
+        for (int rIndex = 0; rIndex < rows; ++rIndex)
+        {
+            juce::Array<int> ops;
+            for (int op = 0; op < FM::numOps; ++op)
+                if (row[(size_t) op] == rIndex) ops.add (op);
+            const float cellW = area.getWidth() / (float) ops.size();
+            for (int i = 0; i < ops.size(); ++i)
+                boxes[(size_t) ops[i]] = juce::Rectangle<float> (area.getX() + cellW * (float) i, area.getBottom() - cellH * (float) (rIndex + 1), cellW, cellH)
+                                             .withSizeKeepingCentre (30.0f, juce::jmin (24.0f, cellH - 8.0f));
+        }
+
+        g.setColour (Theme::textDim);
+        for (int op = 0; op < FM::numOps; ++op)
+            for (int target = 0; target < op; ++target)
+                if (alg.mods[(size_t) target] & (1 << op))
+                    g.drawLine ({ boxes[(size_t) op].getCentre().withY (boxes[(size_t) op].getBottom()),
+                                  boxes[(size_t) target].getCentre().withY (boxes[(size_t) target].getY()) }, 1.5f);
+
+        const auto fb = boxes[3];
+        g.drawRoundedRectangle (fb.withX (fb.getRight() - 4).withWidth (12).expanded (0, 4), 3.0f, 1.0f);
+
+        for (int op = 0; op < FM::numOps; ++op)
+        {
+            const bool carrier = alg.carriers & (1 << op);
+            g.setColour (carrier ? Theme::accent : Theme::panel);
+            g.fillRoundedRectangle (boxes[(size_t) op], 3.0f);
+            g.setColour (carrier ? juce::Colours::black : Theme::text);
+            g.setFont (Theme::font (12.0f, true));
+            g.drawText (juce::String (op + 1), boxes[(size_t) op], juce::Justification::centred);
+        }
+    }
+
+    void sync()
+    {
+        for (auto& k : knobs)
+            if (k.getParam() != nullptr)
+                k.sync();
+        if (algorithm.getSelectedItemIndex() != currentAlgorithm())
+        {
+            algorithm.setSelectedItemIndex (currentAlgorithm(), juce::dontSendNotification);
+            repaint();
+        }
+    }
+
+    void timerCallback() override { sync(); }
+
+    Studio& studio;
+    juce::ReferenceCountedObjectPtr<FMSynthPlugin> plugin;
+    std::array<ParamKnob, FM::numParams> knobs;
+    juce::ComboBox algorithm;
+    juce::Rectangle<int> diagramArea;
+};
+
 // FL's channel settings window: the instrument's controls + a playable keyboard at the bottom.
 class ChannelSettings : public juce::Component, private juce::MidiKeyboardState::Listener
 {
@@ -515,9 +673,19 @@ public:
                     editor = std::make_unique<SamplerView> (studio, channelId, *sampler);
                 else if (auto ms = dynamic_cast<MultiSamplerPlugin*> (plugin.get()))
                     editor = std::make_unique<InstrumentView> (studio, channelId, *ms);
+                else if (auto fm = dynamic_cast<FMSynthPlugin*> (plugin.get()))
+                    editor = std::make_unique<FMSynthView> (studio, *fm);
                 else
                     editor = std::make_unique<GenericPluginEditor> (studio, *plugin);
                 addAndMakeVisible (*editor);
+
+                if (Presets::isSynthType (plugin->getPluginType()))
+                {
+                    synth = plugin;
+                    presetButton.setTooltip ("Factory sounds and your saved presets");
+                    presetButton.onClick = [this] { Presets::showMenu (studio, synth, presetButton); };
+                    addAndMakeVisible (presetButton);
+                }
             }
         }
 
@@ -533,6 +701,8 @@ public:
         const bool isSampler = dynamic_cast<SamplerView*> (editor.get()) != nullptr;
         if (auto iv = dynamic_cast<InstrumentView*> (editor.get()))
             setSize (560, iv->isDrumPad() ? 560 : 260);
+        else if (dynamic_cast<FMSynthView*> (editor.get()) != nullptr)
+            setSize (640, 500);
         else
             setSize (isSampler ? 560 : 640, isSampler ? 300 : 460);
     }
@@ -541,12 +711,24 @@ public:
 
     int getChannelId() const { return channelId; }
 
-    void paint (juce::Graphics& g) override { g.fillAll (Theme::panelDark); }
+    void paint (juce::Graphics& g) override
+    {
+        g.fillAll (Theme::panelDark);
+        if (synth != nullptr)
+        {
+            g.setColour (Theme::text);
+            g.setFont (Theme::font (14.0f, true));
+            g.drawText (studio.getChannel (channelId)[IDs::name].toString(), presetButton.getBounds().withX (10).withRight (presetButton.getX() - 10),
+                        juce::Justification::centredLeft, true);
+        }
+    }
 
     void resized() override
     {
         auto r = getLocalBounds();
         keyboard.setBounds (r.removeFromBottom (70));
+        if (synth != nullptr)
+            presetButton.setBounds (r.removeFromTop (34).reduced (10, 5).removeFromRight (90));
         if (editor != nullptr)
             editor->setBounds (r);
     }
@@ -566,6 +748,8 @@ private:
     Studio& studio;
     const int channelId;
     std::unique_ptr<juce::Component> editor;
+    te::Plugin::Ptr synth;
+    juce::TextButton presetButton { "Presets" };
     juce::MidiKeyboardState keyboardState;
     juce::MidiKeyboardComponent keyboard { keyboardState, juce::MidiKeyboardComponent::horizontalKeyboard };
 };
