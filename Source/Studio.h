@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DrumKit.h"
+#include "MultiSampler.h"
 
 namespace te = tracktion;
 
@@ -40,6 +41,8 @@ namespace ChannelType
     inline const juce::String audio   = "audio";   // FL "audio clip" channel: plays playlist audio clips
     inline const juce::String plugin  = "plugin";  // third-party instrument
     inline const juce::String automation = "automation"; // playlist automation clip type
+    inline const juce::String instrument = "instrument"; // MultiSampler: SFZ / SoundFont / WAV / slicer
+    inline const juce::String drumpad = "drumpad";       // MultiSampler with 16 pads
 }
 
 class Studio : private juce::ValueTree::Listener,
@@ -53,6 +56,7 @@ public:
     explicit Studio (te::Engine& e) : engine (e)
     {
         DrumKit::ensureDefaultKit();
+        MultiSampler::getInstrumentsFolder().createDirectory();
         setupMidiInputs();
         newProject();
     }
@@ -200,6 +204,58 @@ public:
             track->pluginList.insertPlugin (plugin, 0, nullptr);
         return addChannelState (*track, ChannelType::plugin, desc.name, {});
     }
+
+    // SFZ / SoundFont / audio file in our multi-sampler.
+    int addInstrumentChannel (const juce::File& file)
+    {
+        undo().beginNewTransaction ("Add instrument");
+        const auto name = file.getFileNameWithoutExtension();
+        auto track = createChannelTrack (name);
+        if (auto ms = createMultiSampler (*track))
+            ms->loadFile (file);
+        return addChannelState (*track, ChannelType::instrument, name, file);
+    }
+
+    // FL "FPC"-style: 16 pads on notes 36..51, loaded with the default kit.
+    int addDrumPadChannel()
+    {
+        undo().beginNewTransaction ("Add drum pad");
+        auto track = createChannelTrack ("Drum pad");
+        if (auto ms = createMultiSampler (*track))
+            ms->setRegions (MultiSampler::defaultDrumPads());
+        return addChannelState (*track, ChannelType::drumpad, "Drum pad", {});
+    }
+
+    // FL "Slicex"-style: chops a loop at its hits onto keys from C5 and writes a pattern replaying it.
+    int addSlicerChannel (const juce::File& file)
+    {
+        MultiSampler::SampleCache cache (engine.getAudioFileFormatManager().readFormatManager);
+        const auto audio = cache.get (file);
+        if (audio.data == nullptr || audio.data->getNumSamples() == 0)
+            return 0;
+
+        const auto length = (juce::int64) audio.data->getNumSamples();
+        const auto starts = MultiSampler::detectSlices (*audio.data, audio.sampleRate);
+        const auto regions = MultiSampler::sliceRegions (file, starts, length);
+
+        undo().beginNewTransaction ("Add slicer");
+        const auto name = file.getFileNameWithoutExtension();
+        auto track = createChannelTrack (name);
+        if (auto ms = createMultiSampler (*track))
+            ms->setRegions (regions);
+        const int id = addChannelState (*track, ChannelType::instrument, name, file);
+
+        const double beatsPerSample = getBpm() / 60.0 / audio.sampleRate;
+        auto pattern = getCurrentPatternState();
+        for (int i = 0; i < regions.size(); ++i)
+        {
+            const auto end = i + 1 < starts.size() ? starts[i + 1] : length;
+            addNote (pattern, id, (double) starts[i] * beatsPerSample, (double) (end - starts[i]) * beatsPerSample, 60 + i, 100);
+        }
+        return id;
+    }
+
+    MultiSamplerPlugin* getMultiSampler (int channelId) const { return dynamic_cast<MultiSamplerPlugin*> (getInstrument (channelId)); }
 
     juce::Array<juce::PluginDescription> getKnownPlugins (bool instruments) const
     {
@@ -973,7 +1029,8 @@ public:
         auto existing = findStepNote (pattern, channelId, step);
 
         if (on && ! existing.isValid())
-            addNote (pattern, channelId, step * stepBeats, stepBeats, defaultRootNote, 100);
+            addNote (pattern, channelId, step * stepBeats, stepBeats,
+                     getChannel (channelId)[IDs::type].toString() == ChannelType::drumpad ? MultiSampler::firstPadNote : defaultRootNote, 100);
         else if (! on && existing.isValid())
         {
             pattern.removeChild (existing, &undo());
@@ -1142,6 +1199,13 @@ private:
         auto clip = track->insertMIDIClip ("Notes", { 0s, edit->tempoSequence.toTime (te::BeatPosition::fromBeats (getBarBeats())) }, nullptr);
         clip->state.setProperty (IDs::derived, true, nullptr);
         return track.get();
+    }
+
+    MultiSamplerPlugin* createMultiSampler (te::AudioTrack& track)
+    {
+        auto plugin = edit->getPluginCache().createNewPlugin (MultiSamplerPlugin::xmlTypeName, {});
+        track.pluginList.insertPlugin (plugin, 0, nullptr);
+        return dynamic_cast<MultiSamplerPlugin*> (plugin.get());
     }
 
     int addChannelState (te::AudioTrack& track, const juce::String& type, const juce::String& name, const juce::File& file)

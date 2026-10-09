@@ -19,6 +19,7 @@ namespace Effects
         AIRWINDOWS_LIST (US_REGISTER_AIRWINDOWS)
        #undef US_REGISTER_AIRWINDOWS
         pm.createBuiltInType<AnalyzerPlugin>();
+        pm.createBuiltInType<MultiSamplerPlugin>();
         pm.createBuiltInType<te::ImpulseResponsePlugin>();
     }
 

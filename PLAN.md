@@ -119,7 +119,7 @@ Every feature, every phase:
 
 ## Phase 5 — Sampler & browser
 - [x] Sampler channel: load WAV/MP3/FLAC/AIFF, pitch by note, root note, start/end
-- [ ] Sample looping (Tracktion's sampler has no loop mode; needs custom sampler)
+- [x] Sample looping — via our own multi-sampler: add the WAV as an "Instrument" channel (Loop on/off + start/end in its channel window). The old "Sampler" channel (Tracktion's) still has no loop.
 - [x] Drag-and-drop audio files onto the channel rack
 - [x] File browser panel (left side, like FL) with folders + preview on click
 - [x] Waveform display (`AudioThumbnail`)
@@ -262,9 +262,9 @@ Every effect has a themed window, bypass, factory presets (main ones) and user p
 > (CC0 / CC-BY). Keep a `SOUNDS_LICENSES.md` listing source + license for every pack.
 
 ### 14a — Sample-based instrument engine (do this first, it unlocks most sounds)
-- [ ] SFZ instrument player (use **sfizz** library, BSD license) → loads 1000s of free instruments
-- [ ] SoundFont (.sf2) player (≈ Fruity Soundfont Player; TinySoundFont or FluidSynth)
-- [ ] Multi-sample + velocity layers + round robins
+- [x] SFZ instrument player — own parser + engine (`Source/MultiSampler.h`), not sfizz. Supports <control>/<global>/<master>/<group>/<region>, default_path, #define, key ranges + note names, velocity layers, round robin (seq_*), tune/transpose/volume/pan, offset/end, loop modes, amp ADSR, group/off_by. No filters/LFOs/curves/CC modulation/keyswitches yet.
+- [x] SoundFont (.sf2) player — TinySoundFont (MIT, `libs/TinySoundFont`) parses the file, presets become multi-sampler regions; preset selector in the channel window. SF2 modulators/filter/vibrato ignored.
+- [x] Multi-sample + velocity layers + round robins (32 voices, voice stealing, sustain pedal, pitch bend ±2)
 - [ ] Rompler browser with categories (≈ FLEX): pick preset → plays instantly
 
 ### 14b — Bundled acoustic instruments (via 14a)
@@ -291,9 +291,9 @@ Every effect has a themed window, bypass, factory presets (main ones) and user p
 - [ ] Granular synth
 
 ### 14d — Drums
-- [ ] Drum pad instrument, 16 pads, velocity, choke groups (≈ FPC)
+- [x] Drum pad instrument, 16 pads, velocity, choke groups (≈ FPC) — "Drum pad" channel, notes 36..51, default kit, closed hat chokes open hat, click pad to play, drop a sample on a pad to replace it
 - [ ] Drum synth (synthesized kicks/snares/hats)
-- [ ] Slicer: chop loops to pads/notes (≈ Fruity Slicer / Slicex)
+- [x] Slicer: chop loops to pads/notes (≈ Fruity Slicer / Slicex) — energy-flux onset detection (8 equal slices fallback), slices on keys from C5, writes a pattern that replays the loop. No slice editing UI yet.
 
 ### 14e — Sound library (content, not code)
 - [ ] Drum kits: trap, hip-hop, house, techno, lo-fi, rock, acoustic

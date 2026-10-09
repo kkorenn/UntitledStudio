@@ -78,6 +78,8 @@ namespace Exporter
         for (auto plugin : te::getAllPlugins (edit, false))
             if (auto sampler = dynamic_cast<te::SamplerPlugin*> (plugin))
                 sampler->flushPendingUpdates();
+            else if (auto ms = dynamic_cast<MultiSamplerPlugin*> (plugin))
+                ms->flushPendingUpdates();
 
         te::Renderer::Parameters p (edit);
         p.destFile = file;

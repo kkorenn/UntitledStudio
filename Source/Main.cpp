@@ -847,6 +847,8 @@ private:
 public:
     void requestQuit() { quitRequested(); }
     void debugOpenFirstChannel() { toggleChannelWindow (studio.getChannels().getChild (0)[IDs::id]); }
+    void debugOpenDrumPad()      { toggleChannelWindow (studio.addDrumPadChannel()); }
+    void debugOpenInstrument()   { toggleChannelWindow (studio.addInstrumentChannel (DrumKit::getDrumsFolder().getChildFile ("808.wav"))); }
     void debugOpenPianoRoll()
     {
         auto pattern = studio.getCurrentPatternState();
@@ -1156,6 +1158,155 @@ namespace SelfTest
             dir.deleteRecursively();
         }
 
+        // Multi-sampler instruments (SFZ, single WAV loop, drum pad, slicer).
+        const auto instrDir = juce::File::createTempFile ("instr");
+        int sfzChannel = 0, padChannel = 0, sliceChannel = 0, sf2Channel = 0;
+        {
+            using namespace DrumKit::detail;
+            const auto tone = instrDir.getChildFile ("samples/tone.wav");
+            double phase = 0.0;
+            writeWav (tone, render (0.1, [&] (double, Rng&) { phase += juce::MathConstants<double>::twoPi * 440.0 / sampleRate; return (float) std::sin (phase) * 0.5f; }));
+
+            const auto sfz = instrDir.getChildFile ("test.sfz");
+            sfz.replaceWithText ("// test instrument\n"
+                                 "<control> default_path=samples/\n"
+                                 "<global> ampeg_release=0.2 /* inherited */\n"
+                                 "<group> lokey=c4 hikey=b4 pitch_keycenter=c4\n"
+                                 "<region> sample=tone.wav lovel=1 hivel=63\n"
+                                 "<region> sample=tone.wav lovel=64 hivel=127 volume=-3\n"
+                                 "<group> key=c#5 seq_length=2 unknown_opcode=7\n"
+                                 "<region> sample=tone.wav seq_position=1\n"
+                                 "<region> sample=tone.wav seq_position=2 tune=50\n"
+                                 "<region> sample=*sine\n");
+            const auto regions = MultiSampler::parseSfz (sfz);
+            ok &= check (regions.size() == 4, "SFZ: 4 regions parsed (generator skipped)");
+            if (regions.size() == 4)
+            {
+                ok &= check ((int) regions[0]["lokey"] == 60 && (int) regions[0]["hikey"] == 71 && (int) regions[0]["pitch_keycenter"] == 60,
+                             "SFZ: group key range with note names (c4 = 60)");
+                ok &= check ((int) regions[0]["hivel"] == 63 && (int) regions[1]["lovel"] == 64 && juce::approximatelyEqual ((double) regions[1]["volume"], -3.0),
+                             "SFZ: velocity layers");
+                ok &= check (juce::approximatelyEqual ((double) regions[3]["ampeg_release"], 0.2) && juce::File (regions[0]["sample"].toString()) == tone,
+                             "SFZ: <global> inherited, default_path resolved");
+                ok &= check ((int) regions[2]["lokey"] == 73 && (int) regions[2]["hikey"] == 73 && (int) regions[2]["seq_length"] == 2
+                             && (int) regions[3]["seq_position"] == 2, "SFZ: key= shortcut and round robin");
+            }
+
+            juce::AudioFormatManager formats;
+            formats.registerBasicFormats();
+            auto makeSet = [&formats] (const juce::Array<juce::ValueTree>& trees)
+            {
+                MultiSampler::SampleCache cache (formats);
+                auto set = std::make_unique<MultiSampler::SoundSet>();
+                for (auto& t : trees)
+                    if (auto r = MultiSampler::loadRegion (t, cache))
+                        set->regions.push_back (*r);
+                set->seqCounters.resize (set->regions.size());
+                return set;
+            };
+            auto run = [] (MultiSampler::Engine& e, double seconds)
+            {
+                juce::AudioBuffer<float> out (2, (int) (seconds * 44100.0));
+                out.clear();
+                for (int i = 0; i < out.getNumSamples(); i += 512)
+                    e.render (out, i, juce::jmin (512, out.getNumSamples() - i), {});
+                return out;
+            };
+
+            {
+                auto set = makeSet (regions);
+                MultiSampler::Engine e;
+                e.prepare (44100.0);
+                e.setSoundSet (set.get());
+                e.handleMidi (juce::MidiMessage::noteOn (1, 73, (juce::uint8) 100), {});
+                ok &= check (e.getNumActiveVoices() == 1, "round robin plays one of two alternates");
+                e.reset();
+                e.handleMidi (juce::MidiMessage::noteOn (1, 64, (juce::uint8) 30), {});
+                ok &= check (e.getNumActiveVoices() == 1, "velocity picks one layer");
+            }
+
+            for (auto looped : { true, false })
+            {
+                auto region = MultiSampler::makeRegion (tone, 0, 127, 60);
+                region.setProperty ("loop_mode", looped ? "loop_continuous" : "no_loop", nullptr);
+                auto set = makeSet ({ region });
+                MultiSampler::Engine e;
+                e.prepare (44100.0);
+                e.setSoundSet (set.get());
+                e.handleMidi (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 127), {});
+                const auto out = run (e, 0.5);
+                const float tail = out.getMagnitude (0, 22050 - 4410, 4410);
+                if (looped) ok &= check (tail > 0.1f, "looping region keeps sounding past the sample end");
+                else        ok &= check (tail < 1.0e-4f && e.getNumActiveVoices() == 0, "unlooped region stops at the sample end");
+            }
+
+            {
+                auto set = makeSet (MultiSampler::defaultDrumPads());
+                MultiSampler::Engine e;
+                e.prepare (44100.0);
+                e.setSoundSet (set.get());
+                e.handleMidi (juce::MidiMessage::noteOn (1, MultiSampler::firstPadNote + 5, (juce::uint8) 100), {}); // open hat
+                run (e, 0.05);
+                e.handleMidi (juce::MidiMessage::noteOn (1, MultiSampler::firstPadNote + 4, (juce::uint8) 100), {}); // closed hat
+                run (e, 0.3);
+                ok &= check (e.getNumActiveVoices() == 0, "closed hat chokes the open hat");
+            }
+
+            // End to end: SFZ channel renders through the engine.
+            sfzChannel = s.addInstrumentChannel (sfz);
+            auto ms = s.getMultiSampler (sfzChannel);
+            ok &= check (ms != nullptr && ms->getInfo().numRegions == 4, "SFZ instrument channel loads 4 regions");
+            s.addNote (s.getCurrentPatternState(), sfzChannel, 0.0, 1.0, 60, 100);
+            Exporter::Settings es;
+            es.song = false;
+            es.tailSeconds = 0.2;
+            const auto wav = instrDir.getChildFile ("render.wav");
+            Exporter::render (s, es, wav, { s.getTrack (sfzChannel) }, false);
+            if (auto reader = std::unique_ptr<juce::AudioFormatReader> (formats.createReaderFor (wav)))
+            {
+                juce::AudioBuffer<float> buffer ((int) reader->numChannels, (int) reader->lengthInSamples);
+                reader->read (&buffer, 0, buffer.getNumSamples(), 0, true, true);
+                ok &= check (buffer.getMagnitude (0, buffer.getNumSamples()) > 0.05f, "instrument channel renders audio offline");
+            }
+            else ok &= check (false, "instrument channel renders audio offline");
+
+            // SoundFont (only if one is installed, e.g. `brew install fluid-synth`).
+            const juce::File sf2 ("/opt/homebrew/share/fluid-synth/sf2/VintageDreamsWaves-v2.sf2");
+            if (sf2.existsAsFile())
+            {
+                sf2Channel = s.addInstrumentChannel (sf2);
+                auto font = s.getMultiSampler (sf2Channel);
+                ok &= check (font->getInfo().presetNames.size() > 1 && font->getInfo().numRegions > 0, "SoundFont loads presets");
+                font->setProgram (2);
+                font->flushPendingUpdates();
+                ok &= check (font->getProgram() == 2 && font->getInfo().numRegions > 0, "SoundFont preset change");
+                s.addNote (s.getCurrentPatternState(), sf2Channel, 0.0, 1.0, 60, 100);
+                Exporter::render (s, es, wav, { s.getTrack (sf2Channel) }, false);
+                if (auto reader = std::unique_ptr<juce::AudioFormatReader> (formats.createReaderFor (wav)))
+                {
+                    juce::AudioBuffer<float> buffer ((int) reader->numChannels, (int) reader->lengthInSamples);
+                    reader->read (&buffer, 0, buffer.getNumSamples(), 0, true, true);
+                    ok &= check (buffer.getMagnitude (0, buffer.getNumSamples()) > 0.01f, "SoundFont channel renders audio offline");
+                }
+            }
+
+            padChannel = s.addDrumPadChannel();
+            ok &= check (s.getMultiSampler (padChannel)->getInfo().numRegions == 16, "drum pad has 16 pads");
+
+            // Slicer: 4 hits in a 2 s loop.
+            const auto loopFile = instrDir.getChildFile ("loop.wav");
+            writeWav (loopFile, render (2.0, [] (double t, Rng& rng)
+            {
+                const double local = std::fmod (t, 0.5);
+                return local < 0.15 ? rng.next() * (float) std::exp (-local / 0.03) : 0.0f;
+            }));
+            const int notesBefore = s.getCurrentPatternState().getNumChildren();
+            sliceChannel = s.addSlicerChannel (loopFile);
+            const int slices = sliceChannel != 0 ? s.getMultiSampler (sliceChannel)->getInfo().numRegions : 0;
+            ok &= check (slices == 4, "slicer finds the 4 hits (" + juce::String (slices) + ")");
+            ok &= check (s.getCurrentPatternState().getNumChildren() == notesBefore + slices, "slicer writes one pattern note per slice");
+        }
+
         const auto file = juce::File::createTempFile (Studio::fileExtension);
         s.setSongMode (false);
         const int savedChannels = s.getChannels().getNumChildren();
@@ -1169,10 +1320,17 @@ namespace SelfTest
             ok &= check (loaded.getChannels().getNumChildren() == savedChannels, "channels survive save/load");
             ok &= check (countNotes (loaded, kick) == savedNotes, "notes survive save/load");
             ok &= check (loaded.getInsertEffects (3).size() == 1 && loaded.getChannelInsert (kick) == 3, "mixer survives save/load");
+            for (int id : { sfzChannel, padChannel, sliceChannel, sf2Channel })
+                if (id != 0)
+                    ok &= check (loaded.getMultiSampler (id) != nullptr && s.getMultiSampler (id) != nullptr
+                                 && loaded.getMultiSampler (id)->getInfo().numRegions == s.getMultiSampler (id)->getInfo().numRegions
+                                 && loaded.getMultiSampler (id)->getProgram() == s.getMultiSampler (id)->getProgram(),
+                                 "instrument channel survives save/load (" + loaded.getChannel (id)[IDs::name].toString() + ")");
             loaded.setStep (kick, 2, true);
             ok &= check (countNotes (loaded, kick) == savedNotes + 1, "loaded project still drives the engine");
         }
         file.deleteFile();
+        instrDir.deleteRecursively();
 
         std::cout << (ok ? "PASS" : "FAILED") << std::endl;
         return ok;
@@ -1237,6 +1395,14 @@ public:
             if (commandLine.contains ("--open-pianoroll"))
                 if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
                     mc->debugOpenPianoRoll();
+
+            if (commandLine.contains ("--open-drumpad"))
+                if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
+                    mc->debugOpenDrumPad();
+
+            if (commandLine.contains ("--open-instrument"))
+                if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
+                    mc->debugOpenInstrument();
 
             if (commandLine.contains ("--open-channel"))
                 if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))

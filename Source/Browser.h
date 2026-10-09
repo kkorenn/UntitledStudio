@@ -130,7 +130,7 @@ private:
                     if (c.isDirectory())
                         addSubItem (new Item (browser, c));
                 for (auto& c : children)
-                    if (isAudioFile (c, wildcard) || c.hasFileExtension (Studio::fileExtension))
+                    if (isAudioFile (c, wildcard) || c.hasFileExtension (Studio::fileExtension) || MultiSampler::isInstrumentFile (c))
                         addSubItem (new Item (browser, c));
             }
         }
@@ -149,7 +149,7 @@ private:
         {
             if (file.isDirectory())
                 setOpen (! isOpen());
-            else if (! file.hasFileExtension (Studio::fileExtension))
+            else if (! file.hasFileExtension (Studio::fileExtension) && ! MultiSampler::isInstrumentFile (file))
                 browser.preview.play (file); // FL: click a sound to hear it
 
             if (e.mods.isPopupMenu() && getParentItem() == browser.tree.getRootItem() && browser.isUserFolder (file))

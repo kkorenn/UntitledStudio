@@ -398,6 +398,16 @@ private:
             const int id = studio.addSynthChannel();
             studio.selectChannel (id);
         });
+        m.addItem ("Instrument (SFZ / SoundFont)...", [this]
+        {
+            chooseFile ("Choose an instrument", "*.sfz;*.sf2", [this] (const juce::File& f) { return studio.addInstrumentChannel (f); });
+        });
+        m.addItem ("Drum pad", [this] { openNew (studio.addDrumPadChannel()); });
+        m.addItem ("Slicer...", [this]
+        {
+            chooseFile ("Choose a loop to slice", studio.engine.getAudioFileFormatManager().readFormatManager.getWildcardForAllFormats(),
+                        [this] (const juce::File& f) { return studio.addSlicerChannel (f); });
+        });
 
         juce::PopupMenu plugins;
         for (auto& d : studio.getKnownPlugins (true))
@@ -411,6 +421,25 @@ private:
         plugins.addItem ("Scan / manage plugins...", [this] { if (onManagePlugins) onManagePlugins(); });
         m.addSubMenu ("Plugins (VST3 / AU)", plugins);
         m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (addButton));
+    }
+
+    void openNew (int id)
+    {
+        if (id == 0)
+            return;
+        studio.selectChannel (id);
+        if (onOpenChannel) onOpenChannel (id);
+    }
+
+    void chooseFile (const juce::String& title, const juce::String& wildcard, std::function<int (const juce::File&)> create)
+    {
+        chooser = std::make_unique<juce::FileChooser> (title, MultiSampler::getInstrumentsFolder(), wildcard);
+        chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                              [this, create] (const juce::FileChooser& fc)
+                              {
+                                  if (fc.getResult().existsAsFile())
+                                      openNew (create (fc.getResult()));
+                              });
     }
 
     int rowIndexAt (juce::Point<int> p) const
@@ -435,6 +464,12 @@ private:
         if (! file.existsAsFile())
             return;
 
+        if (MultiSampler::isInstrumentFile (file))
+        {
+            studio.selectChannel (studio.addInstrumentChannel (file));
+            return;
+        }
+
         const int index = rowIndexAt (position);
         if (index >= 0)
         {
@@ -454,6 +489,7 @@ private:
     Studio& studio;
     juce::Slider swingKnob;
     juce::TextButton addButton { "+" };
+    std::unique_ptr<juce::FileChooser> chooser;
     juce::Viewport viewport;
     juce::Component rowHolder;
     juce::OwnedArray<ChannelRow> rows;

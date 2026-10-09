@@ -2,6 +2,7 @@
 
 #include "PluginEditor.h"
 #include "Studio.h"
+#include "ParamKnob.h"
 
 // FL note names: MIDI 60 = C5.
 inline juce::String noteName (int note) { return juce::MidiMessage::getMidiNoteName (note, true, true, 5); }
@@ -210,6 +211,296 @@ private:
     bool dragOver = false;
 };
 
+// FL "FPC"-style 4x4 pads (pad 1 bottom-left). Click = play, drop a sample on a pad = replace it.
+class DrumPadGrid : public juce::Component,
+                    public juce::DragAndDropTarget,
+                    public juce::FileDragAndDropTarget
+{
+public:
+    DrumPadGrid (Studio& s, int channel, MultiSamplerPlugin& p) : studio (s), channelId (channel), plugin (&p) {}
+
+    void paint (juce::Graphics& g) override
+    {
+        for (int i = 0; i < MultiSampler::numPads; ++i)
+        {
+            auto r = padBounds (i).toFloat();
+            const auto region = findPad (i);
+            const bool lit = i == playingPad || i == hoverPad;
+            g.setColour (lit ? Theme::accent : Theme::panel);
+            g.fillRoundedRectangle (r, 4.0f);
+            g.setColour (Theme::outline);
+            g.drawRoundedRectangle (r, 4.0f, 1.0f);
+
+            auto label = region["name"].toString();
+            if (label.isEmpty())
+                label = juce::File (region["sample"].toString()).getFileNameWithoutExtension();
+            g.setColour (lit ? juce::Colours::black : Theme::text);
+            g.setFont (Theme::font (13.0f, true));
+            g.drawText (label, r.reduced (6.0f), juce::Justification::centred, true);
+            g.setColour (lit ? juce::Colours::black.withAlpha (0.6f) : Theme::textDim);
+            g.setFont (Theme::font (10.0f));
+            g.drawText (juce::String (i + 1) + "  " + noteName (MultiSampler::firstPadNote + i), r.reduced (5.0f, 3.0f),
+                        juce::Justification::bottomLeft);
+        }
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        playingPad = padAt (e.getPosition());
+        if (playingPad < 0)
+            return;
+        studio.selectChannel (channelId);
+        studio.playLiveNote (juce::MidiMessage::noteOn (1, MultiSampler::firstPadNote + playingPad, (juce::uint8) 110));
+        repaint();
+    }
+
+    void mouseUp (const juce::MouseEvent&) override
+    {
+        if (playingPad >= 0)
+            studio.playLiveNote (juce::MidiMessage::noteOff (1, MultiSampler::firstPadNote + playingPad));
+        playingPad = -1;
+        repaint();
+    }
+
+    bool isInterestedInDragSource (const SourceDetails& d) override { return d.description.toString().startsWith ("file:"); }
+    void itemDragMove (const SourceDetails& d) override              { setHover (padAt (d.localPosition)); }
+    void itemDragExit (const SourceDetails&) override                { setHover (-1); }
+    void itemDropped (const SourceDetails& d) override
+    {
+        setHover (-1);
+        replacePad (padAt (d.localPosition), juce::File (d.description.toString().fromFirstOccurrenceOf ("file:", false, false)));
+    }
+
+    bool isInterestedInFileDrag (const juce::StringArray&) override     { return true; }
+    void fileDragMove (const juce::StringArray&, int x, int y) override { setHover (padAt ({ x, y })); }
+    void fileDragExit (const juce::StringArray&) override               { setHover (-1); }
+    void filesDropped (const juce::StringArray& files, int x, int y) override
+    {
+        setHover (-1);
+        replacePad (padAt ({ x, y }), juce::File (files[0]));
+    }
+
+private:
+    juce::Rectangle<int> padBounds (int i) const
+    {
+        const int w = getWidth() / 4, h = getHeight() / 4;
+        return juce::Rectangle<int> ((i % 4) * w, (3 - i / 4) * h, w, h).reduced (3);
+    }
+
+    int padAt (juce::Point<int> p) const
+    {
+        for (int i = 0; i < MultiSampler::numPads; ++i)
+            if (padBounds (i).contains (p))
+                return i;
+        return -1;
+    }
+
+    juce::ValueTree findPad (int i) const
+    {
+        for (auto r : plugin->getRegionStates())
+            if ((int) r["lokey"] == MultiSampler::firstPadNote + i)
+                return r;
+        return {};
+    }
+
+    void setHover (int pad) { if (pad != hoverPad) { hoverPad = pad; repaint(); } }
+
+    void replacePad (int pad, const juce::File& file)
+    {
+        auto region = findPad (pad);
+        if (! region.isValid() || ! file.existsAsFile())
+            return;
+        studio.undo().beginNewTransaction ("Replace pad sample");
+        region.setProperty ("sample", file.getFullPathName(), &studio.undo());
+        region.setProperty ("name", file.getFileNameWithoutExtension(), &studio.undo());
+        region.removeProperty ("tune", &studio.undo());
+        repaint();
+    }
+
+    Studio& studio;
+    const int channelId;
+    juce::ReferenceCountedObjectPtr<MultiSamplerPlugin> plugin;
+    int playingPad = -1, hoverPad = -1;
+};
+
+// Channel window for the multi-sampler: SFZ / SoundFont / WAV instruments, drum pads, slices.
+class InstrumentView : public juce::Component, private juce::Timer
+{
+public:
+    InstrumentView (Studio& s, int channel, MultiSamplerPlugin& p) : studio (s), channelId (channel), plugin (&p)
+    {
+        const std::pair<te::AutomatableParameter::Ptr, const char*> params[] = {
+            { plugin->volume, "VOL" }, { plugin->attack, "ATT" }, { plugin->decay, "DEC" },
+            { plugin->sustain, "SUS" }, { plugin->release, "REL" }, { plugin->tune, "TUNE" } };
+        for (auto& [param, label] : params)
+        {
+            knobs[(size_t) knobLabels.size()].bind (studio, param);
+            addAndMakeVisible (knobs[(size_t) knobLabels.size()]);
+            knobLabels.add (label);
+        }
+
+        presets.setTooltip ("SoundFont preset");
+        presets.onChange = [this]
+        {
+            if (presets.getSelectedItemIndex() >= 0 && presets.getSelectedItemIndex() != plugin->getProgram())
+            {
+                studio.undo().beginNewTransaction ("Change preset");
+                plugin->setProgram (presets.getSelectedItemIndex());
+            }
+        };
+        addChildComponent (presets);
+
+        loop.setTooltip ("Loop the sample while the note is held");
+        loop.onClick = [this] { setLoop (loop.getToggleState() ? "loop_continuous" : "no_loop"); };
+        addChildComponent (loop);
+        for (auto* n : { &loopStart, &loopEnd })
+        {
+            n->format = [] (double v) { return juce::String (v, 1) + "%"; };
+            addChildComponent (*n);
+        }
+        loopStart.setTooltip ("Loop start (% of the sample)");
+        loopEnd.setTooltip ("Loop end (% of the sample)");
+        loopStart.onChange = [this] (double v) { setLoopPoint ("loop_start", v); };
+        loopEnd.onChange = [this] (double v) { setLoopPoint ("loop_end", v); };
+
+        if (isDrumPad())
+        {
+            pads = std::make_unique<DrumPadGrid> (studio, channelId, *plugin);
+            addAndMakeVisible (*pads);
+        }
+
+        sync();
+        startTimerHz (10);
+    }
+
+    bool isDrumPad() const { return studio.getChannel (channelId)[IDs::type].toString() == ChannelType::drumpad; }
+
+    // A plain audio file instrument: one region we can loop.
+    bool isSingleSample() const { return plugin->usesRegionState() && plugin->getRegionStates().size() == 1; }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.fillAll (Theme::panelDark);
+        const auto& info = plugin->getInfo();
+        auto r = getLocalBounds().reduced (10);
+        g.setColour (Theme::text);
+        g.setFont (Theme::font (14.0f, true));
+        g.drawText (studio.getChannel (channelId)[IDs::name].toString(), r.removeFromTop (20), juce::Justification::centredLeft, true);
+
+        juce::String details;
+        if (isDrumPad())
+            details = "Drum pad - 16 pads (C3..D#4). Drop samples on pads.";
+        else
+            details = plugin->getSource().getFileName();
+        details << "   |   " << info.numRegions << (info.numRegions == 1 ? " region" : " regions");
+        g.setColour (info.error.isNotEmpty() ? Theme::accent : Theme::textDim);
+        g.setFont (Theme::font (12.0f));
+        g.drawText (info.error.isNotEmpty() ? info.error : details, r.removeFromTop (18), juce::Justification::centredLeft, true);
+
+        g.setFont (Theme::font (11.0f));
+        g.setColour (Theme::textDim);
+        for (size_t i = 0; i < knobs.size(); ++i)
+            g.drawText (knobLabels[(int) i], knobs[i].getBounds().translated (0, knobs[i].getHeight()).withHeight (14), juce::Justification::centred);
+        if (loop.isVisible())
+        {
+            g.drawText ("LOOP", loop.getBounds().translated (-40, 0).withWidth (36), juce::Justification::centredRight);
+            g.drawText ("START", loopStart.getBounds().translated (-44, 0).withWidth (40), juce::Justification::centredRight);
+            g.drawText ("END", loopEnd.getBounds().translated (-34, 0).withWidth (30), juce::Justification::centredRight);
+        }
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (10);
+        auto header = r.removeFromTop (38);
+        presets.setBounds (header.removeFromRight (240).withHeight (24));
+
+        r.removeFromTop (6);
+        auto knobRow = r.removeFromTop (48);
+        for (auto& k : knobs)
+        {
+            k.setBounds (knobRow.removeFromLeft (48).reduced (4, 0));
+            knobRow.removeFromLeft (6);
+        }
+        r.removeFromTop (18);
+
+        auto loopRow = r.removeFromTop (24);
+        loopRow.removeFromLeft (44);
+        loop.setBounds (loopRow.removeFromLeft (24));
+        loopRow.removeFromLeft (60);
+        loopStart.setBounds (loopRow.removeFromLeft (70));
+        loopRow.removeFromLeft (50);
+        loopEnd.setBounds (loopRow.removeFromLeft (70));
+
+        if (pads != nullptr)
+            pads->setBounds (r.withTrimmedTop (-24));
+    }
+
+private:
+    juce::ValueTree singleRegion() const { return plugin->getRegionStates().getFirst(); }
+
+    void setLoop (const juce::String& mode)
+    {
+        studio.undo().beginNewTransaction ("Loop");
+        singleRegion().setProperty ("loop_mode", mode, &studio.undo());
+    }
+
+    void setLoopPoint (const juce::Identifier& id, double percent)
+    {
+        const auto length = plugin->getInfo().firstRegionLength;
+        if (length <= 0)
+            return;
+        studio.undo().beginNewTransaction ("Loop point");
+        auto region = singleRegion();
+        const auto sample = (juce::int64) (percent / 100.0 * (double) length);
+        region.setProperty (id, juce::jlimit<juce::int64> (0, length - 1, id == juce::Identifier ("loop_end") ? sample - 1 : sample), &studio.undo());
+        if (region["loop_mode"].toString() != "loop_continuous" && region["loop_mode"].toString() != "loop_sustain")
+            region.setProperty ("loop_mode", "loop_continuous", &studio.undo());
+    }
+
+    void sync()
+    {
+        for (auto& k : knobs)
+            k.sync();
+
+        const auto& info = plugin->getInfo();
+        if (info.presetNames != shownPresets)
+        {
+            shownPresets = info.presetNames;
+            presets.clear (juce::dontSendNotification);
+            presets.addItemList (shownPresets, 1);
+        }
+        presets.setVisible (! shownPresets.isEmpty());
+        presets.setSelectedItemIndex (plugin->getProgram(), juce::dontSendNotification);
+
+        const bool single = isSingleSample() && info.firstRegionLength > 0;
+        for (auto* c : std::initializer_list<juce::Component*> { &loop, &loopStart, &loopEnd })
+            c->setVisible (single);
+        if (single)
+        {
+            const auto region = singleRegion();
+            const auto mode = region["loop_mode"].toString();
+            loop.setToggleState (mode == "loop_continuous" || mode == "loop_sustain", juce::dontSendNotification);
+            const double length = (double) info.firstRegionLength;
+            loopStart.setValue (region.hasProperty ("loop_start") ? (double) region["loop_start"] / length * 100.0 : 0.0);
+            loopEnd.setValue (region.hasProperty ("loop_end") ? ((double) region["loop_end"] + 1.0) / length * 100.0 : 100.0);
+        }
+        repaint();
+    }
+
+    void timerCallback() override { sync(); }
+
+    Studio& studio;
+    const int channelId;
+    juce::ReferenceCountedObjectPtr<MultiSamplerPlugin> plugin;
+    std::array<ParamKnob, 6> knobs;
+    juce::StringArray knobLabels, shownPresets;
+    juce::ComboBox presets;
+    Widgets::LedButton loop { "Loop" };
+    Widgets::DragNumber loopStart { 0.0, 100.0, 0.25 }, loopEnd { 0.0, 100.0, 0.25 };
+    std::unique_ptr<DrumPadGrid> pads;
+};
+
 // FL's channel settings window: the instrument's controls + a playable keyboard at the bottom.
 class ChannelSettings : public juce::Component, private juce::MidiKeyboardState::Listener
 {
@@ -222,6 +513,8 @@ public:
             {
                 if (auto sampler = dynamic_cast<te::SamplerPlugin*> (plugin.get()))
                     editor = std::make_unique<SamplerView> (studio, channelId, *sampler);
+                else if (auto ms = dynamic_cast<MultiSamplerPlugin*> (plugin.get()))
+                    editor = std::make_unique<InstrumentView> (studio, channelId, *ms);
                 else
                     editor = std::make_unique<GenericPluginEditor> (studio, *plugin);
                 addAndMakeVisible (*editor);
@@ -238,7 +531,10 @@ public:
 
         Widgets::noFocus (*this);
         const bool isSampler = dynamic_cast<SamplerView*> (editor.get()) != nullptr;
-        setSize (isSampler ? 560 : 640, isSampler ? 300 : 460);
+        if (auto iv = dynamic_cast<InstrumentView*> (editor.get()))
+            setSize (560, iv->isDrumPad() ? 560 : 260);
+        else
+            setSize (isSampler ? 560 : 640, isSampler ? 300 : 460);
     }
 
     ~ChannelSettings() override { keyboardState.removeListener (this); }
