@@ -10,7 +10,7 @@ namespace te = tracktion;
 //   STUDIO (currentPattern, songMode, swing)
 //     CHANNELS / CHANNEL (id, name, type, track, file, colour)
 //     PATTERNS / PATTERN (id, name, colour) / NOTE (channel, start, length, key, velocity)
-//     PLAYLIST / PCLIP   (pattern, lane, start, length)
+//     PLAYLIST / PCLIP   (id, type, pattern | channel, lane, start, length, offset, muted)  -- beats
 //
 // Each channel = one Tracktion AudioTrack holding its instrument + one "derived" MidiClip.
 // The derived clip's notes are regenerated from the model (patterns + playlist) whenever the
@@ -23,7 +23,8 @@ namespace IDs
     STUDIO_ID (id) STUDIO_ID (name) STUDIO_ID (type) STUDIO_ID (track) STUDIO_ID (file) STUDIO_ID (colour)
     STUDIO_ID (channel) STUDIO_ID (start) STUDIO_ID (length) STUDIO_ID (key) STUDIO_ID (velocity)
     STUDIO_ID (pattern) STUDIO_ID (lane) STUDIO_ID (currentPattern) STUDIO_ID (songMode) STUDIO_ID (swing)
-    STUDIO_ID (derived) STUDIO_ID (nextId)
+    STUDIO_ID (derived) STUDIO_ID (nextId) STUDIO_ID (offset) STUDIO_ID (muted) STUDIO_ID (loopStart) STUDIO_ID (loopEnd)
+    STUDIO_ID (clipId)
    #undef STUDIO_ID
 }
 
@@ -31,6 +32,7 @@ namespace ChannelType
 {
     inline const juce::String sampler = "sampler";
     inline const juce::String synth   = "synth";
+    inline const juce::String audio   = "audio";   // FL "audio clip" channel: plays playlist audio clips
 }
 
 class Studio : private juce::ValueTree::Listener,
@@ -227,6 +229,7 @@ public:
     }
 
     int getSelectedChannel() const { return selectedChannel; }
+    int newId()                    { return takeNextId(); }
 
     void selectChannel (int channelId)
     {
@@ -261,6 +264,124 @@ public:
     }
 
     void setCurrentPattern (int patternId)       { studio.setProperty (IDs::currentPattern, patternId, nullptr); }
+
+    int newPattern()
+    {
+        undo().beginNewTransaction ("New pattern");
+        const int id = addPattern ("Pattern " + juce::String (getPatterns().getNumChildren() + 1));
+        setCurrentPattern (id);
+        return id;
+    }
+
+    int clonePattern (int patternId)
+    {
+        const auto source = getPattern (patternId);
+        if (! source.isValid())
+            return 0;
+
+        undo().beginNewTransaction ("Clone pattern");
+        auto copy = source.createCopy();
+        const int id = takeNextId();
+        copy.setProperty (IDs::id, id, nullptr);
+        copy.setProperty (IDs::name, source[IDs::name].toString() + " clone", nullptr);
+        getPatterns().appendChild (copy, &undo());
+        setCurrentPattern (id);
+        return id;
+    }
+
+    void deletePattern (int patternId)
+    {
+        if (getPatterns().getNumChildren() <= 1)
+            return;
+
+        undo().beginNewTransaction ("Delete pattern");
+        auto playlist = getPlaylist();
+        for (int i = playlist.getNumChildren(); --i >= 0;)
+            if ((int) playlist.getChild (i)[IDs::pattern] == patternId && playlist.getChild (i)[IDs::type].toString() != ChannelType::audio)
+                playlist.removeChild (i, &undo());
+
+        getPatterns().removeChild (getPattern (patternId), &undo());
+        if (getCurrentPattern() == patternId)
+            setCurrentPattern (getPatterns().getChild (0)[IDs::id]);
+    }
+
+    juce::Colour getPatternColour (const juce::ValueTree& pattern) const
+    {
+        if (pattern.hasProperty (IDs::colour))
+            return juce::Colour::fromString (pattern[IDs::colour].toString());
+        static const juce::uint32 palette[] = { 0xff5f8fd8, 0xff63b56d, 0xffd88a4c, 0xffb46ed0, 0xffd45d6c, 0xff4fb3b0, 0xffc9b64c, 0xff8a8fd9 };
+        return juce::Colour (palette[(int) pattern[IDs::id] % 8]);
+    }
+
+    //==========================================================================
+    // Playlist
+
+    juce::ValueTree getPlaylist() const { return studio.getChildWithName (IDs::PLAYLIST); }
+
+    juce::ValueTree addPatternClip (int patternId, int lane, double start)
+    {
+        juce::ValueTree c (IDs::PCLIP);
+        c.setProperty (IDs::id, takeNextId(), nullptr);
+        c.setProperty (IDs::pattern, patternId, nullptr);
+        c.setProperty (IDs::lane, lane, nullptr);
+        c.setProperty (IDs::start, juce::jmax (0.0, start), nullptr);
+        c.setProperty (IDs::length, getPatternLengthBeats (getPattern (patternId)), nullptr);
+        getPlaylist().appendChild (c, &undo());
+        return c;
+    }
+
+    // FL: dropping a sound on the playlist makes an audio clip (and an audio clip channel for it).
+    juce::ValueTree addAudioClip (const juce::File& file, int lane, double start)
+    {
+        te::AudioFile audioFile (engine, file);
+        if (! audioFile.isValid())
+            return {};
+
+        int channelId = 0;
+        for (auto ch : getChannels())
+            if (ch[IDs::type].toString() == ChannelType::audio && ch[IDs::file].toString() == file.getFullPathName())
+                channelId = ch[IDs::id];
+
+        if (channelId == 0)
+        {
+            auto track = createChannelTrack (file.getFileNameWithoutExtension());
+            channelId = addChannelState (*track, ChannelType::audio, file.getFileNameWithoutExtension(), file);
+        }
+
+        const double beats = audioFile.getLength() * getBpm() / 60.0;
+        juce::ValueTree c (IDs::PCLIP);
+        c.setProperty (IDs::id, takeNextId(), nullptr);
+        c.setProperty (IDs::type, ChannelType::audio, nullptr);
+        c.setProperty (IDs::channel, channelId, nullptr);
+        c.setProperty (IDs::lane, lane, nullptr);
+        c.setProperty (IDs::start, juce::jmax (0.0, start), nullptr);
+        c.setProperty (IDs::length, beats, nullptr);
+        getPlaylist().appendChild (c, &undo());
+        return c;
+    }
+
+    static bool isAudioClip (const juce::ValueTree& clip) { return clip[IDs::type].toString() == ChannelType::audio; }
+
+    double getSongLengthBeats() const
+    {
+        double end = 0.0;
+        for (auto c : getPlaylist())
+            end = juce::jmax (end, (double) c[IDs::start] + (double) c[IDs::length]);
+        return end;
+    }
+
+    // Song-mode loop region (ruler drag in the playlist). Empty = loop whole song.
+    juce::Range<double> getSongLoop() const { return { (double) studio[IDs::loopStart], (double) studio[IDs::loopEnd] }; }
+    void setSongLoop (juce::Range<double> r)
+    {
+        studio.setProperty (IDs::loopStart, r.getStart(), nullptr);
+        studio.setProperty (IDs::loopEnd, r.getEnd(), nullptr);
+    }
+
+    void setPositionBeats (double beats)
+    {
+        transport().setPosition (edit->tempoSequence.toTime (te::BeatPosition::fromBeats (juce::jmax (0.0, beats))));
+    }
 
     double getBarBeats() const
     {
@@ -442,6 +563,59 @@ private:
         sampler.setSoundOpenEnded (0, true); // one-shot, like FL's sampler default
     }
 
+    // Keeps the track's wave clips in step with the playlist's audio clips (song mode only).
+    // Built straight from ValueTrees with no UndoManager: they're derived, like the MIDI clips.
+    void syncAudioClips (te::AudioTrack& track, int channelId, bool song)
+    {
+        std::map<int, juce::ValueTree> wanted;
+        if (song)
+            for (auto pc : getPlaylist())
+                if (isAudioClip (pc) && (int) pc[IDs::channel] == channelId && ! (bool) pc[IDs::muted])
+                    wanted[(int) pc[IDs::id]] = pc;
+
+        const juce::File file (getChannel (channelId)[IDs::file].toString());
+        auto& tempo = edit->tempoSequence;
+
+        juce::Array<juce::ValueTree> stale;
+        for (auto clip : track.getClips())
+            if (dynamic_cast<te::WaveAudioClip*> (clip) != nullptr && ! wanted.count ((int) clip->state[IDs::clipId]))
+                stale.add (clip->state);
+        for (auto& state : stale)
+            state.getParent().removeChild (state, nullptr);
+
+        for (auto& [id, pc] : wanted)
+        {
+            const double start = pc[IDs::start], length = pc[IDs::length], offset = pc[IDs::offset];
+            const auto startTime = tempo.toTime (te::BeatPosition::fromBeats (start));
+            const auto endTime = tempo.toTime (te::BeatPosition::fromBeats (start + length));
+            const double offsetSeconds = offset * 60.0 / getBpm();
+
+            juce::ValueTree existing;
+            for (auto clip : track.getClips())
+                if ((int) clip->state[IDs::clipId] == id)
+                    existing = clip->state;
+
+            if (! existing.isValid())
+            {
+                existing = juce::ValueTree (te::IDs::AUDIOCLIP);
+                existing.setProperty (te::IDs::name, file.getFileNameWithoutExtension(), nullptr);
+                existing.setProperty (te::IDs::source, file.getFullPathName(), nullptr);
+                existing.setProperty (IDs::clipId, id, nullptr);
+                edit->createNewItemID().writeID (existing, nullptr);
+                existing.setProperty (te::IDs::start, startTime.inSeconds(), nullptr);
+                existing.setProperty (te::IDs::length, (endTime - startTime).inSeconds(), nullptr);
+                existing.setProperty (te::IDs::offset, offsetSeconds, nullptr);
+                track.state.addChild (existing, -1, nullptr);
+            }
+            else
+            {
+                existing.setProperty (te::IDs::start, startTime.inSeconds(), nullptr);
+                existing.setProperty (te::IDs::length, (endTime - startTime).inSeconds(), nullptr);
+                existing.setProperty (te::IDs::offset, offsetSeconds, nullptr);
+            }
+        }
+    }
+
     te::MidiClip* getDerivedClip (te::AudioTrack& track) const
     {
         for (auto clip : track.getClips())
@@ -464,8 +638,7 @@ private:
         double endBeats = song ? 0.0 : getPatternLengthBeats (pattern);
 
         if (song)
-            for (auto pc : studio.getChildWithName (IDs::PLAYLIST))
-                endBeats = juce::jmax (endBeats, (double) pc[IDs::start] + (double) pc[IDs::length]);
+            endBeats = getSongLengthBeats();
 
         endBeats = juce::jmax (endBeats, getBarBeats());
 
@@ -483,44 +656,55 @@ private:
             auto& seq = clip->getSequence();
             seq.clear (nullptr);
 
-            auto addNotes = [&] (const juce::ValueTree& p, double offset, double maxLength)
+            // Notes of pattern `p` that fall inside [offset, offset + clipLength), placed at clipStart.
+            auto addNotes = [&] (const juce::ValueTree& p, double clipStart, double clipLength, double offset)
             {
                 for (auto note : p)
                 {
                     if ((int) note[IDs::channel] != channelId)
                         continue;
 
-                    double start = note[IDs::start];
-                    if (start >= maxLength)
+                    const double rel = (double) note[IDs::start] - offset;
+                    if (rel < -1.0e-6 || rel >= clipLength - 1.0e-6)
                         continue;
 
+                    double start = note[IDs::start];
                     const double stepIndex = start / stepBeats;
                     if (std::abs (stepIndex - std::round (stepIndex)) < 1.0e-4 && ((int) std::round (stepIndex)) % 2 == 1)
                         start += swingShift;
 
-                    const double length = juce::jmin ((double) note[IDs::length], maxLength - (double) note[IDs::start]);
-                    seq.addNote (note[IDs::key], te::BeatPosition::fromBeats (offset + start),
+                    const double length = juce::jmin ((double) note[IDs::length], clipLength - rel);
+                    seq.addNote (note[IDs::key], te::BeatPosition::fromBeats (clipStart + start - offset),
                                  te::BeatDuration::fromBeats (length), note[IDs::velocity], 0, nullptr);
                 }
             };
 
             if (song)
             {
-                for (auto pc : studio.getChildWithName (IDs::PLAYLIST))
-                    addNotes (getPattern (pc[IDs::pattern]), pc[IDs::start], pc[IDs::length]);
+                for (auto pc : getPlaylist())
+                    if (! isAudioClip (pc) && ! (bool) pc[IDs::muted])
+                        addNotes (getPattern (pc[IDs::pattern]), pc[IDs::start], pc[IDs::length], pc[IDs::offset]);
             }
             else
             {
-                addNotes (pattern, 0.0, endBeats);
+                addNotes (pattern, 0.0, endBeats, 0.0);
             }
+
+            if (channel[IDs::type].toString() == ChannelType::audio)
+                syncAudioClips (*track, channelId, song);
 
             const auto endTime = edit->tempoSequence.toTime (te::BeatPosition::fromBeats (endBeats));
             clip->state.setProperty (te::IDs::start, 0.0, nullptr);
             clip->state.setProperty (te::IDs::length, endTime.inSeconds(), nullptr);
         }
 
-        transport().setLoopRange ({ 0s, edit->tempoSequence.toTime (te::BeatPosition::fromBeats (endBeats)) });
-        loopEndBeats = endBeats;
+        auto loop = juce::Range<double> (0.0, endBeats);
+        if (song && getSongLoop().getLength() > 1.0e-6)
+            loop = getSongLoop();
+
+        transport().setLoopRange ({ edit->tempoSequence.toTime (te::BeatPosition::fromBeats (loop.getStart())),
+                                    edit->tempoSequence.toTime (te::BeatPosition::fromBeats (loop.getEnd())) });
+        loopEndBeats = loop.getEnd();
     }
 
 public:

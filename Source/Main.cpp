@@ -12,6 +12,7 @@ using namespace std::literals;
 #include "ChannelRack.h"
 #include "Browser.h"
 #include "PianoRoll.h"
+#include "Playlist.h"
 
 //==============================================================================
 // FL "typing keyboard to piano": Z-row = lower octave, Q-row = upper octave.
@@ -137,6 +138,14 @@ public:
         metronome.onClick = [this] { studio.setMetronome (metronome.getToggleState()); };
         addAndMakeVisible (metronome);
 
+        patternButton.setTooltip ("Pattern selector: pick, add, clone, rename patterns");
+        patternButton.onClick = [this] { showPatternMenu(); };
+        addAndMakeVisible (patternButton);
+
+        playlistButton.setTooltip ("Playlist (F5)");
+        playlistButton.onClick = [this] { playlistPanel->toggle(); };
+        addAndMakeVisible (playlistButton);
+
         pianoRollButton.setTooltip ("Piano roll (F7)");
         pianoRollButton.onClick = [this] { pianoRollPanel->toggle(); };
         addAndMakeVisible (pianoRollButton);
@@ -152,6 +161,13 @@ public:
         browser.onOpenProject = [this] (const juce::File& f) { maybeSave ([this, f] { openFile (f); }); };
         addAndMakeVisible (browser);
         addAndMakeVisible (workspace);
+
+        auto list = std::make_unique<Playlist> (studio);
+        playlist = list.get();
+        list->onShowChannelRack = [this] { channelRackPanel->show(); };
+        playlistPanel = std::make_unique<Panel> ("Playlist - Arrangement", std::move (list));
+        workspace.addAndMakeVisible (*playlistPanel);
+        playlistPanel->setBounds (10, 10, 1100, 700);
 
         auto rack = std::make_unique<ChannelRack> (studio);
         rack->onOpenChannel = [this] (int id) { toggleChannelWindow (id); };
@@ -169,7 +185,8 @@ public:
         typing.onMidi = [this] (const juce::MidiMessage& m) { studio.playLiveNote (m); };
         typing.isReserved = [this] (int code)
         {
-            return isFrontPanel (*pianoRollPanel) && juce::String ("pbdec").containsChar ((juce::juce_wchar) code);
+            return (isFrontPanel (*pianoRollPanel) && juce::String ("pbdec").containsChar ((juce::juce_wchar) code))
+                || (isFrontPanel (*playlistPanel) && Playlist::reservedKeys().containsChar ((juce::juce_wchar) code));
         };
 
         lastGeneration = studio.getEditGeneration();
@@ -236,6 +253,8 @@ public:
         auto bar = r.removeFromTop (toolbarHeight).reduced (6, 6);
         patSongButton.setBounds (bar.removeFromLeft (64));
         bar.removeFromLeft (8);
+        patternButton.setBounds (bar.removeFromLeft (130));
+        bar.removeFromLeft (8);
         playButton.setBounds (bar.removeFromLeft (34));
         stopButton.setBounds (bar.removeFromLeft (34));
         recordButton.setBounds (bar.removeFromLeft (34));
@@ -246,6 +265,8 @@ public:
         bar.removeFromLeft (8);
         metronome.setBounds (bar.removeFromLeft (22).withSizeKeepingCentre (20, 20));
         bar.removeFromLeft (20);
+        playlistButton.setBounds (bar.removeFromLeft (80));
+        bar.removeFromLeft (4);
         channelRackButton.setBounds (bar.removeFromLeft (110));
         bar.removeFromLeft (4);
         pianoRollButton.setBounds (bar.removeFromLeft (90));
@@ -274,6 +295,9 @@ public:
         if (cmd && code == 'Z')                       { studio.undo().undo(); return true; }
         if (isFrontPanel (*pianoRollPanel) && pianoRoll->handleKey (key))
             return true;
+        if (isFrontPanel (*playlistPanel) && playlist->handleKey (key))
+            return true;
+        if (key == juce::KeyPress::F5Key)             { playlistPanel->toggle(); return true; }
         if (key == juce::KeyPress::spaceKey)          { studio.togglePlay(); return true; }
         if (key == juce::KeyPress::F7Key)             { pianoRollPanel->toggle(); return true; }
         if (key == juce::KeyPress::F6Key)             { channelRackPanel->toggle(); return true; }
@@ -481,8 +505,52 @@ private:
         resized();
     }
 
+    // FL pattern picker.
+    void showPatternMenu()
+    {
+        juce::PopupMenu m;
+        const int current = studio.getCurrentPattern();
+        for (auto p : studio.getPatterns())
+        {
+            const int id = p[IDs::id];
+            m.addColouredItem (id, p[IDs::name].toString(), studio.getPatternColour (p), true, id == current);
+        }
+        m.addSeparator();
+        m.addItem (-1, "New pattern");
+        m.addItem (-2, "Clone");
+        m.addItem (-3, "Rename...");
+        m.addItem (-4, "Delete", studio.getPatterns().getNumChildren() > 1);
+
+        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (patternButton), [this, current] (int result)
+        {
+            if (result > 0)        studio.setCurrentPattern (result);
+            else if (result == -1) studio.newPattern();
+            else if (result == -2) studio.clonePattern (current);
+            else if (result == -4) studio.deletePattern (current);
+            else if (result == -3)
+            {
+                auto* w = new juce::AlertWindow ("Rename pattern", {}, juce::MessageBoxIconType::NoIcon);
+                w->addTextEditor ("name", studio.getPattern (current)[IDs::name].toString());
+                w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+                w->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+                w->enterModalState (true, juce::ModalCallbackFunction::create ([this, w, current] (int r)
+                {
+                    if (r == 1)
+                    {
+                        studio.undo().beginNewTransaction ("Rename pattern");
+                        studio.getPattern (current).setProperty (IDs::name, w->getTextEditorContents ("name"), &studio.undo());
+                    }
+                }), true);
+            }
+        });
+    }
+
     void updatePatSong()
     {
+        const auto patternName = studio.getCurrentPatternState()[IDs::name].toString();
+        if (patternButton.getButtonText() != patternName)
+            patternButton.setButtonText (patternName);
+
         const bool song = studio.isSongMode();
         patSongButton.setToggleState (song, juce::dontSendNotification);
         patSongButton.setButtonText (song ? "SONG" : "PAT");
@@ -627,6 +695,23 @@ public:
         pianoRollPanel->show();
     }
 
+    void debugDemoSong()
+    {
+        const int p1 = studio.getCurrentPattern();
+        for (int step : { 0, 4, 8, 12 })
+            studio.setStep (studio.getChannels().getChild (0)[IDs::id], step, true);
+        const int p2 = studio.newPattern();
+        for (int step : { 4, 12 })
+            studio.setStep (studio.getChannels().getChild (1)[IDs::id], step, true);
+        for (int bar = 0; bar < 8; ++bar)
+            studio.addPatternClip (p1, 0, bar * 4.0);
+        for (int bar = 2; bar < 8; ++bar)
+            studio.addPatternClip (p2, 1, bar * 4.0);
+        studio.addAudioClip (DrumKit::getDrumsFolder().getChildFile ("808.wav"), 2, 4.0);
+        studio.setSongMode (true);
+        channelRackPanel->setVisible (false);
+    }
+
 private:
 
     TypingKeyboard typing;
@@ -638,10 +723,12 @@ private:
     TransportButton recordButton { TransportButton::record, "Record (coming in Phase 12)" };
     Widgets::DragNumber tempo { 10.0, 522.0, 0.5 };
     Widgets::LedButton metronome { "Metronome", Theme::accent };
-    juce::TextButton channelRackButton { "Channel rack" }, browserButton { "Browser" }, pianoRollButton { "Piano roll" };
+    juce::TextButton channelRackButton { "Channel rack" }, browserButton { "Browser" }, pianoRollButton { "Piano roll" },
+                     playlistButton { "Playlist" }, patternButton { "Pattern 1" };
 
     juce::Component workspace;
-    std::unique_ptr<Panel> channelRackPanel, pianoRollPanel;
+    std::unique_ptr<Panel> playlistPanel, channelRackPanel, pianoRollPanel;
+    Playlist* playlist = nullptr;
     PianoRoll* pianoRoll = nullptr;
     juce::OwnedArray<Panel> channelPanels;
 
@@ -716,6 +803,29 @@ namespace SelfTest
         s.setStep (kick, 31, true);
         ok &= check (std::abs (s.getPatternLengthBeats (s.getCurrentPatternState()) - 8.0) < 1.0e-6, "pattern grows to 2 bars");
 
+        {
+            // Song mode: two placements of the 5-note pattern -> 10 engine notes.
+            const int p = s.getCurrentPattern();
+            s.addPatternClip (p, 0, 0.0);
+            s.addPatternClip (p, 0, 8.0);
+            s.setSongMode (true);
+            ok &= check (countNotes (s, kick) == 10, "song mode plays every playlist placement");
+            auto muted = s.getPlaylist().getChild (1);
+            muted.setProperty (IDs::muted, true, nullptr);
+            ok &= check (countNotes (s, kick) == 5, "muted clip is silent");
+            muted.setProperty (IDs::muted, false, nullptr);
+
+            auto audio = s.addAudioClip (DrumKit::getDrumsFolder().getChildFile ("Kick.wav"), 1, 4.0);
+            s.regenerateNow();
+            int waveClips = 0;
+            if (auto t = s.getTrack ((int) audio[IDs::channel]))
+                for (auto c : t->getClips())
+                    waveClips += dynamic_cast<te::WaveAudioClip*> (c) != nullptr ? 1 : 0;
+            ok &= check (waveClips == 1, "audio clip becomes an engine wave clip");
+            s.setSongMode (false);
+            ok &= check (countNotes (s, kick) == 5, "pattern mode plays only the current pattern");
+        }
+
         const auto file = juce::File::createTempFile (Studio::fileExtension);
         ok &= check (s.isDirty(), "edits mark project dirty");
         ok &= check (s.saveTo (file), "save project");
@@ -723,7 +833,7 @@ namespace SelfTest
         {
             Studio loaded (engine);
             ok &= check (loaded.load (file), "load project");
-            ok &= check (loaded.getChannels().getNumChildren() == 4, "channels survive save/load");
+            ok &= check (loaded.getChannels().getNumChildren() == 5, "channels survive save/load");
             ok &= check (countNotes (loaded, kick) == 5, "notes survive save/load");
             loaded.setStep (kick, 2, true);
             ok &= check (countNotes (loaded, kick) == 6, "loaded project still drives the engine");
@@ -759,6 +869,10 @@ public:
         if (commandLine.contains ("--snapshot"))
         {
             const auto file = juce::File (commandLine.fromFirstOccurrenceOf ("--snapshot", false, false).trim().upToFirstOccurrenceOf (" ", false, false).unquoted());
+            if (commandLine.contains ("--demo-song"))
+                if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
+                    mc->debugDemoSong();
+
             if (commandLine.contains ("--open-pianoroll"))
                 if (auto* mc = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
                     mc->debugOpenPianoRoll();

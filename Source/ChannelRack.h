@@ -140,8 +140,18 @@ private:
             repaint();
         }
 
+        bool isAudioChannel() const { return studio.getChannel (channelId)[IDs::type].toString() == ChannelType::audio; }
+
         void paint (juce::Graphics& g) override
         {
+            if (isAudioChannel())
+            {
+                g.setColour (Theme::textDim);
+                g.setFont (Theme::font (12.0f));
+                g.drawText ("Audio clip - plays from the playlist", stepsLeft + 4, 0, 300, getHeight(), juce::Justification::centredLeft);
+                return;
+            }
+
             const auto pattern = studio.getCurrentPatternState();
             const int numSteps = rack.getNumSteps();
             const int playingStep = rack.getPlayingStep();
@@ -176,7 +186,7 @@ private:
         void mouseDown (const juce::MouseEvent& e) override
         {
             const int step = stepAt (e.x);
-            if (step < 0)
+            if (step < 0 || isAudioChannel())
                 return;
 
             studio.undo().beginNewTransaction ("Steps");

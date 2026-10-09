@@ -143,14 +143,16 @@ Every feature, every phase:
 **Done when:** you can write a full melody + chords comfortably without touching the step sequencer.
 
 ## Phase 7 — Patterns & Playlist (FL arrangement)
-- [ ] Patterns: each pattern holds notes for many channels (FL-style)
-- [ ] Pattern selector, create / clone / rename / color
-- [ ] Playlist: tracks × time, place pattern clips
-- [ ] Audio clips on playlist
-- [ ] Move, resize, split, slice, mute clips
-- [ ] Loop region, markers
-- [ ] Song mode vs pattern mode toggle
-- [ ] Zoom, scroll, follow playhead
+- [x] Patterns: each pattern holds notes for many channels (FL-style)
+- [x] Pattern selector, create / clone / rename
+- [ ] Pattern colour picker (auto colours for now)
+- [x] Playlist: tracks × time, place pattern clips
+- [x] Audio clips on playlist
+- [x] Move, resize, split, slice, mute clips
+- [x] Loop region
+- [ ] Markers
+- [x] Song mode vs pattern mode toggle
+- [x] Zoom, scroll, follow playhead
 
 **Done when:** arrange a full 3-minute song (intro, verse, drop, outro) from patterns.
 
