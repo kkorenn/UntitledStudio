@@ -237,10 +237,11 @@ Every effect has a themed window, bypass, factory presets (main ones) and user p
 **Done when:** filter sweep automation into the drop works on both stock and 3rd-party plugins.
 
 ## Phase 12 — Recording
-- [ ] Audio input recording (mic / interface) to playlist
-- [ ] Input monitoring, latency compensation for recording
-- [ ] Punch in/out, loop recording, takes
-- [ ] MIDI recording with count-in
+- [x] Audio input recording (mic / interface) to playlist — needs a test with a real mic
+- [x] Input monitoring, latency compensation for recording (Tracktion)
+- [x] Punch in/out (loop region)
+- [ ] Loop recording takes + comping (takes stack on lanes; untested)
+- [x] MIDI recording with count-in (pattern mode overdubs; song mode makes a new pattern)
 
 **Done when:** record vocals over a beat and they line up perfectly.
 

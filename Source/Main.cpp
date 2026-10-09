@@ -84,6 +84,14 @@ public:
 
     TransportButton (Shape s, const juce::String& hint) : juce::Button (hint), shape (s) { setTooltip (hint); }
 
+    std::function<void()> onRightClick;
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        if (e.mods.isPopupMenu() && onRightClick) onRightClick();
+        else juce::Button::mouseDown (e);
+    }
+
     void paintButton (juce::Graphics& g, bool over, bool down) override
     {
         auto r = getLocalBounds().toFloat().reduced (1.0f);
@@ -97,7 +105,8 @@ public:
         else                      p.addEllipse (icon);
 
         g.setColour (shape == play && getToggleState() ? Theme::led
-                                                       : (shape == record ? juce::Colour (0xffd2463c) : Theme::text));
+                                                       : (shape == record ? (getToggleState() ? juce::Colour (0xffff4a3c) : juce::Colour (0xff8a3a35))
+                                                                          : Theme::text));
         g.fillPath (p);
     }
 
@@ -130,8 +139,9 @@ public:
         playButton.onClick = [this] { studio.togglePlay(); };
         stopButton.onClick = [this] { if (studio.isPlaying()) studio.togglePlay(); else studio.transport().setPosition (0s); };
         recordButton.setClickingTogglesState (true);
-        recordButton.setTooltip ("Record automation: move knobs while playing in SONG mode");
-        recordButton.onClick = [this] { studio.setRecordingAutomation (recordButton.getToggleState()); };
+        recordButton.setTooltip ("Record: arm, then press Play. Right-click for what to record (audio, notes, automation, count-in)");
+        recordButton.onClick = [this] { studio.recordArmed = recordButton.getToggleState(); };
+        recordButton.onRightClick = [this] { showRecordMenu(); };
         for (auto* b : { &playButton, &stopButton, &recordButton })
             addAndMakeVisible (b);
 
@@ -395,6 +405,12 @@ public:
     // MIDI thread: forward controller moves to the message thread.
     void handleIncomingMidiMessage (juce::MidiInput*, const juce::MidiMessage& m) override
     {
+        if (m.isNoteOnOrOff())
+            juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<MainComponent> (this), m]
+            {
+                if (safe != nullptr) safe->studio.captureNote (m);
+            });
+
         if (m.isController())
             juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<MainComponent> (this),
                                               ch = m.getChannel(), cc = m.getControllerNumber(), v = m.getControllerValue()]
@@ -604,6 +620,23 @@ private:
         return false;
     }
 
+    void showRecordMenu()
+    {
+        auto& o = studio.recordOptions;
+        juce::PopupMenu m;
+        m.addSectionHeader ("What to record");
+        m.addItem ("Audio (into the playlist)", true, o.audio, [&o] { o.audio = ! o.audio; });
+        m.addItem ("Notes (into the pattern)", true, o.notes, [&o] { o.notes = ! o.notes; });
+        m.addItem ("Automation (knob moves)", true, o.automation, [&o] { o.automation = ! o.automation; });
+        m.addSeparator();
+        m.addItem ("Count-in (1 bar)", true, o.countIn, [&o] { o.countIn = ! o.countIn; });
+        m.addItem ("Punch in/out (playlist loop region)", true, o.punch, [&o] { o.punch = ! o.punch; });
+        m.addItem ("Monitor input", true, o.monitorInput, [&o] { o.monitorInput = ! o.monitorInput; });
+        m.addSeparator();
+        m.addItem ("Audio input settings... (F10)", [this] { showAudioSettings(); });
+        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (recordButton));
+    }
+
     void toggleBrowser()
     {
         browserVisible = ! browserVisible;
@@ -716,7 +749,7 @@ private:
 
         tempo.setValue (studio.getBpm());
         playButton.setToggleState (studio.isPlaying(), juce::dontSendNotification);
-        recordButton.setToggleState (studio.isRecordingAutomation(), juce::dontSendNotification);
+        recordButton.setToggleState (studio.recordArmed || studio.isRecording(), juce::dontSendNotification);
         metronome.setToggleState (studio.isMetronomeOn(), juce::dontSendNotification);
         updatePatSong();
 
@@ -1047,18 +1080,47 @@ namespace SelfTest
             ok &= check (pan->getCurrentNormalisedValue() > 0.99f, "controller moves the knob");
         }
 
+        {
+            // Recording: notes captured into the pattern; recorded audio harvested into the playlist.
+            s.setSongMode (false);
+            s.selectChannel (kick);
+            const int before = s.getCurrentPatternState().getNumChildren();
+            s.recordOptions = {};
+            s.recordOptions.audio = false;
+            s.recordOptions.countIn = false;
+            s.recordArmed = true;
+            s.togglePlay();
+            ok &= check (s.isRecording(), "armed + play starts recording");
+            s.captureNote (juce::MidiMessage::noteOn (1, 64, (juce::uint8) 90));
+            s.captureNote (juce::MidiMessage::noteOff (1, 64));
+            s.togglePlay();
+            s.recordArmed = false;
+            ok &= check (s.getCurrentPatternState().getNumChildren() == before + 1, "recorded note lands in the pattern");
+
+            auto rec = s.getRecorderTrack (true);
+            rec->insertWaveClip ("take", DrumKit::getDrumsFolder().getChildFile ("Snare.wav"),
+                                te::ClipPosition { te::TimeRange (te::TimePosition::fromSeconds (1.0), te::TimePosition::fromSeconds (1.3)), te::TimeDuration() }, false);
+            const int clipsBefore = s.getPlaylist().getNumChildren();
+            ok &= check (s.harvestRecordedAudio() == 1 && s.getPlaylist().getNumChildren() == clipsBefore + 1,
+                         "recorded audio becomes a playlist clip");
+            ok &= check (rec->getClips().isEmpty(), "recorder track is emptied");
+        }
+
         const auto file = juce::File::createTempFile (Studio::fileExtension);
+        s.setSongMode (false);
+        const int savedChannels = s.getChannels().getNumChildren();
+        const int savedNotes = countNotes (s, kick);
         ok &= check (s.isDirty(), "edits mark project dirty");
         ok &= check (s.saveTo (file), "save project");
         ok &= check (! s.isDirty(), "clean after save");
         {
             Studio loaded (engine);
             ok &= check (loaded.load (file), "load project");
-            ok &= check (loaded.getChannels().getNumChildren() == 5, "channels survive save/load");
-            ok &= check (countNotes (loaded, kick) == 5, "notes survive save/load");
+            ok &= check (loaded.getChannels().getNumChildren() == savedChannels, "channels survive save/load");
+            ok &= check (countNotes (loaded, kick) == savedNotes, "notes survive save/load");
             ok &= check (loaded.getInsertEffects (3).size() == 1 && loaded.getChannelInsert (kick) == 3, "mixer survives save/load");
             loaded.setStep (kick, 2, true);
-            ok &= check (countNotes (loaded, kick) == 6, "loaded project still drives the engine");
+            ok &= check (countNotes (loaded, kick) == savedNotes + 1, "loaded project still drives the engine");
         }
         file.deleteFile();
 

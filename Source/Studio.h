@@ -289,6 +289,184 @@ public:
     {
         if (auto track = getTrack (selectedChannel))
             track->injectLiveMidiMessage (m, liveSourceId);
+        captureNote (m);
+    }
+
+    //==========================================================================
+    // Recording (FL: arm the record button, then play).
+
+    struct RecordOptions
+    {
+        bool audio = true, notes = true, automation = true;
+        bool countIn = true, punch = false, monitorInput = false;
+    };
+
+    RecordOptions recordOptions;
+
+    static juce::File getRecordingsFolder()
+    {
+        return juce::File::getSpecialLocation (juce::File::userMusicDirectory)
+                   .getChildFile ("untitledstudio").getChildFile ("Recordings");
+    }
+
+    bool isRecording() const { return recording; }
+    bool recordArmed = false;
+
+    void startRecording()
+    {
+        if (recording)
+            return;
+
+        regenerateNow();
+        recording = true;
+        setRecordingAutomation (recordOptions.automation);
+        pendingNotes.clear();
+        recordStartBeats = isSongMode() ? std::floor (getPositionBeats() / getBarBeats()) * getBarBeats() : 0.0;
+        recordPattern = {};
+
+        edit->setCountInMode (recordOptions.countIn ? te::Edit::CountIn::oneBar : te::Edit::CountIn::none);
+        edit->recordingPunchInOut = recordOptions.punch && getSongLoop().getLength() > 0.0;
+
+        undo().beginNewTransaction ("Record");
+        bool audioArmed = false;
+        if (recordOptions.audio)
+        {
+            auto rec = getRecorderTrack (true);
+            for (auto instance : edit->getAllInputDevices())
+            {
+                if (instance->getInputDevice().getDeviceType() != te::InputDevice::waveDevice)
+                    continue;
+                instance->getInputDevice().setMonitorMode (recordOptions.monitorInput ? te::InputDevice::MonitorMode::on
+                                                                                        : te::InputDevice::MonitorMode::off);
+                if (instance->setTarget (rec->itemID, true, nullptr, 0))
+                {
+                    instance->setRecordingEnabled (rec->itemID, true);
+                    audioArmed = true;
+                }
+            }
+        }
+
+        if (audioArmed)
+            transport().record (false);
+        else
+            transport().play (false);
+    }
+
+    void stopRecording()
+    {
+        if (! recording)
+            return;
+
+        recording = false;
+        transport().stop (false, false);
+        setRecordingAutomation (false);
+
+        // Notes still held when stopping end now.
+        for (auto& [key, held] : pendingNotes)
+            addRecordedNote (key, held.first, getPositionBeats() - held.first, held.second);
+        pendingNotes.clear();
+
+        // Tracktion finishes writing the audio asynchronously; collect it shortly after.
+        juce::Timer::callAfterDelay (400, [this] { harvestRecordedAudio(); });
+    }
+
+    // Turns clips recorded onto the hidden recorder track into playlist audio clips.
+    int harvestRecordedAudio()
+    {
+        auto rec = getRecorderTrack (false);
+        if (rec == nullptr)
+            return 0;
+
+        int harvested = 0;
+        juce::Array<juce::ValueTree> done;
+        int lane = -1;
+        for (auto clip : rec->getClips())
+        {
+            auto wave = dynamic_cast<te::WaveAudioClip*> (clip);
+            if (wave == nullptr)
+                continue;
+
+            const auto source = wave->getOriginalFile();
+            if (! source.existsAsFile())
+                continue;
+
+            // Keep recordings with the user's music, not in a temp folder.
+            getRecordingsFolder().createDirectory();
+            auto dest = getRecordingsFolder().getNonexistentChildFile ("Recording " + juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H%M%S"), ".wav");
+            source.copyFileTo (dest);
+
+            auto& tempo = edit->tempoSequence;
+            const auto pos = wave->getPosition();
+            const double startBeats = tempo.toBeats (pos.getStart()).inBeats();
+            const double lengthBeats = tempo.toBeats (pos.getEnd()).inBeats() - startBeats;
+            if (lane < 0)
+                lane = findFreeLane (startBeats, lengthBeats);
+
+            if (auto pc = addAudioClip (dest, lane, startBeats); pc.isValid())
+            {
+                pc.setProperty (IDs::length, lengthBeats, nullptr);
+                pc.setProperty (IDs::offset, pos.getOffset().inSeconds() * getBpm() / 60.0, nullptr);
+                ++lane; // loop takes stack on the lanes below
+                ++harvested;
+            }
+            done.add (clip->state);
+        }
+
+        for (auto& state : done)
+            state.getParent().removeChild (state, nullptr);
+        if (harvested > 0)
+            setSongMode (true); // FL: recorded audio lands in the playlist
+        return harvested;
+    }
+
+    // Notes from the typing keyboard, on-screen keys and MIDI keyboards while recording.
+    void captureNote (const juce::MidiMessage& m)
+    {
+        if (! recording || ! recordOptions.notes || ! transport().isPlaying() || ! (m.isNoteOn() || m.isNoteOff()))
+            return;
+
+        double pos = getPositionBeats();
+        if (! isSongMode())
+            pos = std::fmod (pos, juce::jmax (1.0e-3, loopEndBeats));
+
+        const int key = m.getNoteNumber();
+        if (m.isNoteOn())
+        {
+            pendingNotes[key] = { pos, (int) m.getVelocity() };
+        }
+        else if (auto it = pendingNotes.find (key); it != pendingNotes.end())
+        {
+            double length = pos - it->second.first;
+            if (length <= 0.0)
+                length += loopEndBeats; // wrapped around the pattern loop
+            addRecordedNote (key, it->second.first, length, it->second.second);
+            pendingNotes.erase (it);
+        }
+    }
+
+    void addRecordedNote (int key, double start, double length, int velocity)
+    {
+        auto pattern = getCurrentPatternState();
+        double offset = 0.0;
+
+        if (isSongMode())
+        {
+            // Song mode: notes go into a fresh pattern placed where recording started.
+            if (! recordPattern.isValid())
+            {
+                const int id = addPattern ("Recording " + juce::String (getPatterns().getNumChildren() + 1));
+                recordPattern = addPatternClip (id, findFreeLane (recordStartBeats, getBarBeats()), recordStartBeats);
+            }
+            pattern = getPattern (recordPattern[IDs::pattern]);
+            offset = recordStartBeats;
+        }
+
+        if (start - offset < 0.0)
+            return;
+
+        addNote (pattern, selectedChannel, start - offset, juce::jmax (1.0 / 64.0, length), key, juce::jlimit (1, 127, velocity));
+        if (recordPattern.isValid())
+            recordPattern.setProperty (IDs::length, getPatternLengthBeats (pattern), nullptr);
     }
 
     //==========================================================================
@@ -839,10 +1017,15 @@ public:
     void togglePlay()
     {
         auto& t = transport();
-        if (t.isPlaying())
+        if (t.isPlaying() || recording)
         {
-            t.stop (false, false);
+            if (recording) stopRecording();
+            else           t.stop (false, false);
             t.setPosition (0s);
+        }
+        else if (recordArmed)
+        {
+            startRecording();
         }
         else
         {
@@ -916,6 +1099,22 @@ private:
         return id;
     }
 
+public:
+    te::AudioTrack* getRecorderTrack (bool create)
+    {
+        for (auto t : te::getAudioTracks (*edit))
+            if (t->state[IDs::type].toString() == "recorder")
+                return t;
+        if (! create)
+            return nullptr;
+        auto t = edit->insertNewAudioTrack (te::TrackInsertPoint::getEndOfTracks (*edit), nullptr);
+        t->setName ("Recorder");
+        t->state.setProperty (IDs::type, "recorder", nullptr);
+        t->setMute (true); // monitoring comes from the input device, not this track's playback
+        return t.get();
+    }
+
+private:
     void ensureInserts()
     {
         auto inserts = getInserts();
@@ -1207,7 +1406,10 @@ private:
     juce::ValueTree studio;
     std::set<juce::String> automatedTargets;
     te::AutomatableParameter* learning = nullptr;
-    bool recordAutomation = false;
+    bool recordAutomation = false, recording = false;
+    double recordStartBeats = 0.0;
+    juce::ValueTree recordPattern;
+    std::map<int, std::pair<double, int>> pendingNotes;
     int selectedChannel = 0;
     int changeCount = 0, editGeneration = 0;
     bool dirty = false;
