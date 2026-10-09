@@ -110,10 +110,10 @@ Every feature, every phase:
 > The big switch. Tracktion gives you timeline, clips, tracks, plugin hosting, undo, save/load.
 - [x] Add Tracktion Engine as submodule (`libs/tracktion_engine`)
 - [x] Rebuild Phases 1–3 features on top of `tracktion::Edit` (Phase 2 synth replaced by Tracktion's 4-OSC)
-- [ ] Project save / load (`.untitled` file)
-- [ ] **Undo / redo from day one** (`UndoManager`) — very hard to add later
-- [ ] Autosave every N minutes + crash recovery
-- [ ] Recent projects list
+- [x] Project save / load (`.usp` file)
+- [x] **Undo / redo from day one** (`UndoManager`) — very hard to add later
+- [x] Autosave every N minutes + crash recovery
+- [x] Recent projects list
 
 **Done when:** make a beat, save, quit, reopen → identical. Undo works on every edit.
 

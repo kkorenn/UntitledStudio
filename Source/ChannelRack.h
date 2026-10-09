@@ -68,6 +68,7 @@ private:
         {
             mute.onClick = [this]
             {
+                studio.undo().beginNewTransaction ("Mute");
                 if (auto t = track()) t->setMute (! mute.getToggleState());
             };
             mute.onRightClick = [this] { toggleSolo(); };
@@ -182,7 +183,7 @@ private:
             if (auto def = param->getDefaultValue())
                 knob.setDoubleClickReturnValue (true, *def);
             knob.getProperties().set ("param", param.get());
-            knob.onDragStart = [param] { param->parameterChangeGestureBegin(); };
+            knob.onDragStart = [this, param] { studio.undo().beginNewTransaction ("Knob"); param->parameterChangeGestureBegin(); };
             knob.onDragEnd   = [param] { param->parameterChangeGestureEnd(); };
             knob.onValueChange = [&knob, param]
             {
@@ -199,6 +200,7 @@ private:
                 return;
 
             // FL: right-click the LED solos this channel; again un-solos.
+            studio.undo().beginNewTransaction ("Solo");
             const bool soloThis = ! t->isSolo (false);
             for (auto channel : studio.getChannels())
                 if (auto other = studio.getTrack (channel))
@@ -214,7 +216,7 @@ private:
                 m.addItem ("Replace sample...", [this] { if (rack.onOpenChannel) rack.onOpenChannel (channelId); });
             m.addSeparator();
             m.addItem ("Delete", studio.getChannels().getNumChildren() > 1,
-                       false, [this, &s = studio, id = channelId] { s.deleteChannel (id); });
+                       false, [&s = studio, id = channelId] { s.deleteChannel (id); });
             m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (name));
         }
 
@@ -310,6 +312,12 @@ private:
     void timerCallback() override
     {
         const int playingStep = getPlayingStep();
+        if (studio.getEditGeneration() != lastGeneration)
+        {
+            lastGeneration = studio.getEditGeneration();
+            rebuildRows();
+        }
+
         if (studio.getChangeCount() != lastChangeCount)
         {
             lastChangeCount = studio.getChangeCount();
@@ -362,5 +370,5 @@ private:
     juce::Viewport viewport;
     juce::Component rowHolder;
     juce::OwnedArray<ChannelRow> rows;
-    int lastChangeCount = -1, lastPlayingStep = -1, ticks = 0;
+    int lastChangeCount = -1, lastPlayingStep = -1, ticks = 0, lastGeneration = 0;
 };

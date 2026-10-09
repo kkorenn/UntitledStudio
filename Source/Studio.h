@@ -34,7 +34,8 @@ namespace ChannelType
 }
 
 class Studio : private juce::ValueTree::Listener,
-               private juce::AsyncUpdater
+               private juce::AsyncUpdater,
+               private juce::ChangeListener
 {
 public:
     static constexpr double stepBeats = 0.25;   // one step = 1/16 note
@@ -51,7 +52,18 @@ public:
     {
         cancelPendingUpdate();
         if (edit != nullptr)
+        {
             studio.removeListener (this);
+            edit->getUndoManager().removeChangeListener (this);
+        }
+    }
+
+    static inline const juce::String fileExtension = ".usp";
+
+    static juce::File getProjectsFolder()
+    {
+        return juce::File::getSpecialLocation (juce::File::userMusicDirectory)
+                   .getChildFile ("untitledstudio").getChildFile ("Projects");
     }
 
     te::Engine& engine;
@@ -81,10 +93,53 @@ public:
         for (auto name : { "Kick", "Clap", "Hat", "Snare" })
             addSamplerChannel (DrumKit::getDrumsFolder().getChildFile (juce::String (name) + ".wav"));
 
-        selectedChannel = getChannels().getChild (0)[IDs::id];
-        updateMidiInputTarget();
-        undo().clearUndoHistory();
+        projectFile = juce::File();
+        finishLoading();
     }
+
+    // Writes the whole project (engine state + FL model) to one file.
+    bool saveTo (const juce::File& file)
+    {
+        regenerateNow();
+        edit->flushState();
+        file.getParentDirectory().createDirectory();
+
+        te::EditFileOperations ops (*edit);
+        if (! ops.writeToFile (file, false))
+            return false;
+
+        projectFile = file;
+        dirty = false;
+        return true;
+    }
+
+    // Saves without changing the project's file or dirty state (autosave).
+    bool saveCopyTo (const juce::File& file)
+    {
+        regenerateNow();
+        edit->flushState();
+        file.getParentDirectory().createDirectory();
+        te::EditFileOperations ops (*edit);
+        return ops.writeToFile (file, false);
+    }
+
+    // asUntitled: used for crash recovery, so saving asks for a new location.
+    bool load (const juce::File& file, bool asUntitled = false)
+    {
+        auto loaded = te::loadEditFromFile (engine, file);
+        if (loaded == nullptr || ! loaded->state.getChildWithName (IDs::STUDIO).isValid())
+            return false;
+
+        setEdit (std::move (loaded));
+        projectFile = asUntitled ? juce::File() : file;
+        finishLoading();
+        dirty = asUntitled;
+        return true;
+    }
+
+    juce::File getProjectFile() const   { return projectFile; }
+    bool isDirty() const                { return dirty; }
+    int getEditGeneration() const       { return editGeneration; }
 
     //==========================================================================
     // Channels
@@ -301,12 +356,28 @@ public:
 
 private:
     //==========================================================================
+    void finishLoading()
+    {
+        selectedChannel = getChannels().getChild (0)[IDs::id];
+        updateMidiInputTarget();
+        regenerateNow();
+        undo().clearUndoHistory();
+        undo().dispatchPendingMessages();
+        dirty = false;
+    }
+
     void setEdit (std::unique_ptr<te::Edit> newEdit)
     {
         if (edit != nullptr)
+        {
             studio.removeListener (this);
+            edit->getUndoManager().removeChangeListener (this);
+            edit->getTransport().stop (false, true);
+        }
 
         edit = std::move (newEdit);
+        edit->getUndoManager().addChangeListener (this);
+        ++editGeneration;
         edit->getTransport().ensureContextAllocated();
         edit->getTransport().looping = true;
 
@@ -448,8 +519,12 @@ private:
     void markChanged()
     {
         ++changeCount;
+        dirty = true;
         triggerAsyncUpdate();
     }
+
+    // Any undoable action (knob moves, mutes...) also counts as an unsaved change.
+    void changeListenerCallback (juce::ChangeBroadcaster*) override { dirty = true; }
 
     void valueTreePropertyChanged (juce::ValueTree&, const juce::Identifier&) override { markChanged(); }
     void valueTreeChildAdded (juce::ValueTree&, juce::ValueTree&) override                { markChanged(); }
@@ -483,7 +558,9 @@ private:
     std::unique_ptr<te::Edit> edit;
     juce::ValueTree studio;
     int selectedChannel = 0;
-    int changeCount = 0;
+    int changeCount = 0, editGeneration = 0;
+    bool dirty = false;
+    juce::File projectFile;
     double loopEndBeats = 4.0;
     const te::MPESourceID liveSourceId = te::createUniqueMPESourceID();
 };

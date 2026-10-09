@@ -147,14 +147,27 @@ public:
 
         typing.onMidi = [this] (const juce::MidiMessage& m) { studio.playLiveNote (m); };
 
+        recent.setMaxNumberOfItems (10);
+        recent.restoreFromString (settings.getValue ("recentFiles"));
+
         Widgets::noFocus (*this);
         setWantsKeyboardFocus (true);
         setSize (1400, 860);
         startTimerHz (30);
+
+        juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<MainComponent> (this)]
+        {
+            if (safe != nullptr) safe->offerCrashRecovery();
+        });
     }
 
     ~MainComponent() override
     {
+        if (cleanExit)
+        {
+            getAutosaveFile().deleteFile();
+            getLockFile().deleteFile();
+        }
         menuBar.setModel (nullptr);
         juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
         setLookAndFeel (nullptr);
@@ -218,6 +231,14 @@ public:
     bool keyPressed (const juce::KeyPress& key) override
     {
         const auto mods = key.getModifiers();
+        const bool cmd = mods.isCommandDown();
+        const int code = key.getKeyCode();
+        if (cmd && code == 'N')                       { newProject(); return true; }
+        if (cmd && code == 'O')                       { openProject(); return true; }
+        if (cmd && code == 'S' && mods.isShiftDown()) { saveAs (nullptr); return true; }
+        if (cmd && code == 'S')                       { save (nullptr); return true; }
+        if (cmd && (code == 'Y' || (code == 'Z' && mods.isShiftDown()))) { studio.undo().redo(); return true; }
+        if (cmd && code == 'Z')                       { studio.undo().undo(); return true; }
         if (key == juce::KeyPress::spaceKey)          { studio.togglePlay(); return true; }
         if (key == juce::KeyPress::F6Key)             { channelRackPanel->toggle(); return true; }
         if (key == juce::KeyPress::F10Key)            { showAudioSettings(); return true; }
@@ -242,12 +263,21 @@ public:
         juce::PopupMenu m;
         if (index == 0)
         {
-            m.addItem ("New", [this] { studio.newProject(); });
+            m.addItem ("New                     Ctrl+N", [this] { newProject(); });
+            m.addItem ("Open...                 Ctrl+O", [this] { openProject(); });
+
+            juce::PopupMenu recentMenu;
+            recent.removeNonExistentFiles();
+            recent.createPopupMenuItems (recentMenu, recentMenuBase, true, true);
+            m.addSubMenu ("Open recent", recentMenu, recent.getNumFiles() > 0);
+            m.addSeparator();
+            m.addItem ("Save                    Ctrl+S", [this] { save (nullptr); });
+            m.addItem ("Save as...        Ctrl+Shift+S", [this] { saveAs (nullptr); });
         }
         else if (index == 1)
         {
-            m.addItem ("Undo", studio.undo().canUndo(), false, [this] { studio.undo().undo(); });
-            m.addItem ("Redo", studio.undo().canRedo(), false, [this] { studio.undo().redo(); });
+            m.addItem ("Undo                    Ctrl+Z", studio.undo().canUndo(), false, [this] { studio.undo().undo(); });
+            m.addItem ("Redo                    Ctrl+Y", studio.undo().canRedo(), false, [this] { studio.undo().redo(); });
         }
         else if (index == 2)
         {
@@ -256,7 +286,110 @@ public:
         return m;
     }
 
-    void menuItemSelected (int, int) override {}
+    void menuItemSelected (int itemId, int) override
+    {
+        if (itemId >= recentMenuBase)
+        {
+            const auto file = recent.getFile (itemId - recentMenuBase);
+            maybeSave ([this, file] { openFile (file); });
+        }
+    }
+
+    //==========================================================================
+    // Project files
+
+    void newProject()             { maybeSave ([this] { studio.newProject(); }); }
+
+    void openProject()
+    {
+        maybeSave ([this]
+        {
+            chooser = std::make_unique<juce::FileChooser> ("Open project", Studio::getProjectsFolder(), "*" + Studio::fileExtension);
+            chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                                  [this] (const juce::FileChooser& fc)
+                                  {
+                                      if (fc.getResult().existsAsFile())
+                                          openFile (fc.getResult());
+                                  });
+        });
+    }
+
+    void openFile (const juce::File& file)
+    {
+        if (studio.load (file))
+            addToRecent (file);
+        else
+            juce::AlertWindow::showAsync (juce::MessageBoxOptions().withIconType (juce::MessageBoxIconType::WarningIcon)
+                                              .withTitle ("Couldn't open project").withMessage (file.getFullPathName()).withButton ("OK"),
+                                          nullptr);
+    }
+
+    void save (std::function<void()> then)
+    {
+        if (studio.getProjectFile() == juce::File())
+            return saveAs (std::move (then));
+
+        writeProject (studio.getProjectFile());
+        if (then) then();
+    }
+
+    void saveAs (std::function<void()> then)
+    {
+        Studio::getProjectsFolder().createDirectory();
+        const auto start = studio.getProjectFile() != juce::File() ? studio.getProjectFile()
+                                                                     : Studio::getProjectsFolder().getChildFile ("Untitled" + Studio::fileExtension);
+        chooser = std::make_unique<juce::FileChooser> ("Save project as", start, "*" + Studio::fileExtension);
+        chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::warnAboutOverwriting,
+                              [this, then] (const juce::FileChooser& fc)
+                              {
+                                  if (fc.getResult() == juce::File())
+                                      return;
+                                  writeProject (fc.getResult().withFileExtension (Studio::fileExtension));
+                                  if (then) then();
+                              });
+    }
+
+    void writeProject (const juce::File& file)
+    {
+        if (studio.saveTo (file))
+            addToRecent (file);
+        else
+            juce::AlertWindow::showAsync (juce::MessageBoxOptions().withIconType (juce::MessageBoxIconType::WarningIcon)
+                                              .withTitle ("Couldn't save project").withMessage (file.getFullPathName()).withButton ("OK"),
+                                          nullptr);
+    }
+
+    // Asks "Save changes?" if needed, then runs `then` (unless cancelled).
+    void maybeSave (std::function<void()> then)
+    {
+        if (! studio.isDirty())
+            return then();
+
+        juce::AlertWindow::showAsync (juce::MessageBoxOptions().withIconType (juce::MessageBoxIconType::QuestionIcon)
+                                          .withTitle ("Save changes?")
+                                          .withMessage ("Save changes to " + getProjectName() + "?")
+                                          .withButton ("Save").withButton ("Don't save").withButton ("Cancel"),
+                                      [this, then] (int result)
+                                      {
+                                          if (result == 1)      save (then);
+                                          else if (result == 2) then();
+                                      });
+    }
+
+    void quitRequested()
+    {
+        maybeSave ([this]
+        {
+            cleanExit = true;
+            juce::JUCEApplication::getInstance()->quit();
+        });
+    }
+
+    juce::String getProjectName() const
+    {
+        const auto f = studio.getProjectFile();
+        return f == juce::File() ? juce::String ("Untitled") : f.getFileNameWithoutExtension();
+    }
 
 private:
     void showAudioSettings()
@@ -338,6 +471,23 @@ private:
             repaint (0, 0, getWidth(), menuHeight + toolbarHeight);
         }
 
+        if (studio.getEditGeneration() != lastGeneration)
+        {
+            lastGeneration = studio.getEditGeneration();
+            channelPanels.clear();
+        }
+
+        // Autosave every 2 minutes while there are unsaved changes.
+        if (++ticks % (30 * 120) == 0 && studio.isDirty())
+            studio.saveCopyTo (getAutosaveFile());
+
+        if (auto* window = getTopLevelComponent())
+        {
+            const auto title = getProjectName() + (studio.isDirty() ? " *" : "") + " - untitledstudio";
+            if (window->getName() != title)
+                window->setName (title);
+        }
+
         tempo.setValue (studio.getBpm());
         playButton.setToggleState (studio.isPlaying(), juce::dontSendNotification);
         metronome.setToggleState (studio.isMetronomeOn(), juce::dontSendNotification);
@@ -350,7 +500,67 @@ private:
                     channelPanels.remove (i);
     }
 
-    static constexpr int menuHeight = 26, toolbarHeight = 44;
+    //==========================================================================
+    // Autosave + crash recovery. A lock file exists while the app runs; if it's still
+    // there at startup, the last session crashed and the autosave can be recovered.
+
+    static juce::File getAppDataFolder()
+    {
+        return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory).getChildFile ("untitledstudio");
+    }
+
+    static juce::File getAutosaveFile() { return getAppDataFolder().getChildFile ("Autosave").getChildFile ("autosave" + Studio::fileExtension); }
+    static juce::File getLockFile()     { return getAppDataFolder().getChildFile ("running.lock"); }
+
+    void offerCrashRecovery()
+    {
+        const bool crashed = getLockFile().existsAsFile() && getAutosaveFile().existsAsFile();
+        getLockFile().create();
+
+        if (! crashed)
+            return;
+
+        juce::AlertWindow::showAsync (juce::MessageBoxOptions().withIconType (juce::MessageBoxIconType::QuestionIcon)
+                                          .withTitle ("Recover project?")
+                                          .withMessage ("untitledstudio didn't close properly last time.\nRecover your last autosave?")
+                                          .withButton ("Recover").withButton ("Discard"),
+                                      [this] (int result)
+                                      {
+                                          if (result == 1)
+                                              studio.load (getAutosaveFile(), true);
+                                          getAutosaveFile().deleteFile();
+                                      });
+    }
+
+    void addToRecent (const juce::File& file)
+    {
+        recent.addFile (file);
+        settings.setValue ("recentFiles", recent.toString());
+        settings.saveIfNeeded();
+    }
+
+    static juce::PropertiesFile::Options settingsOptions()
+    {
+        juce::PropertiesFile::Options o;
+        o.applicationName = "untitledstudio";
+        o.filenameSuffix = ".settings";
+        o.folderName = "untitledstudio";
+        o.osxLibrarySubFolder = "Application Support";
+        return o;
+    }
+
+    static constexpr int menuHeight = 26, toolbarHeight = 44, recentMenuBase = 1000;
+
+    juce::PropertiesFile settings { settingsOptions() };
+    juce::RecentlyOpenedFilesList recent;
+    std::unique_ptr<juce::FileChooser> chooser;
+    int lastGeneration = 0, ticks = 0;
+    bool cleanExit = false;
+
+public:
+    void requestQuit() { quitRequested(); }
+
+private:
 
     Theme::LookAndFeel lookAndFeel;
     Studio studio;
@@ -389,6 +599,12 @@ public:
     }
 
     void closeButtonPressed() override { juce::JUCEApplication::getInstance()->systemRequestedQuit(); }
+
+    void requestQuit()
+    {
+        if (auto* mc = dynamic_cast<MainComponent*> (getContentComponent()))
+            mc->requestQuit();
+    }
 };
 
 //==============================================================================
@@ -433,6 +649,20 @@ namespace SelfTest
 
         s.setStep (kick, 31, true);
         ok &= check (std::abs (s.getPatternLengthBeats (s.getCurrentPatternState()) - 8.0) < 1.0e-6, "pattern grows to 2 bars");
+
+        const auto file = juce::File::createTempFile (Studio::fileExtension);
+        ok &= check (s.isDirty(), "edits mark project dirty");
+        ok &= check (s.saveTo (file), "save project");
+        ok &= check (! s.isDirty(), "clean after save");
+        {
+            Studio loaded (engine);
+            ok &= check (loaded.load (file), "load project");
+            ok &= check (loaded.getChannels().getNumChildren() == 4, "channels survive save/load");
+            ok &= check (countNotes (loaded, kick) == 5, "notes survive save/load");
+            loaded.setStep (kick, 2, true);
+            ok &= check (countNotes (loaded, kick) == 6, "loaded project still drives the engine");
+        }
+        file.deleteFile();
 
         std::cout << (ok ? "PASS" : "FAILED") << std::endl;
         return ok;
@@ -483,7 +713,11 @@ public:
         engine = nullptr;
     }
 
-    void systemRequestedQuit() override { quit(); }
+    void systemRequestedQuit() override
+    {
+        if (mainWindow != nullptr) mainWindow->requestQuit();
+        else quit();
+    }
 
 private:
     std::unique_ptr<te::Engine> engine;

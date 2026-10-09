@@ -87,7 +87,7 @@ namespace Widgets
         void change (double v)
         {
             v = juce::jlimit (minValue, maxValue, v);
-            if (v != value)
+            if (std::abs (v - value) > 1.0e-9)
             {
                 value = v;
                 repaint();
