@@ -1,9 +1,22 @@
 # Building Untitled Studio
 
-JUCE and Tracktion Engine are git submodules in `libs/`:
+## Quick start (macOS)
 
 ```
-git submodule update --init --recursive
+./scripts/build.sh            # debug build in build/ (fetches JUCE + Tracktion submodules if missing)
+./scripts/build.sh --run      # build and launch
+./scripts/build.sh --test     # build and run the self-test
+./scripts/build.sh release    # release build in build-release/
+./scripts/dist.sh             # release build + styled installer: dist/UntitledStudio-<version>-macOS.dmg
+```
+
+The rest of this file describes the manual steps.
+
+JUCE and Tracktion Engine are git submodules in `libs/` (don't use `--recursive`: Tracktion's own
+JUCE submodule isn't needed and uses an SSH URL):
+
+```
+git submodule update --init libs/JUCE libs/tracktion_engine
 ```
 
 Needs CMake 3.22+ and a C++20 compiler.
@@ -26,7 +39,7 @@ cmake --build build-release
 "./build-release/UntitledStudio_artefacts/Release/Untitled Studio.app/Contents/MacOS/Untitled Studio" --stress
 ```
 
-Release packaging (DMG in `dist/`): `scripts/package-macos.sh`, see [RELEASING.md](RELEASING.md).
+Release packaging (DMG in `dist/`): `scripts/dist.sh`, see [RELEASING.md](RELEASING.md).
 
 ## Windows (prepared, not tested yet)
 

@@ -354,7 +354,7 @@ Every effect has a themed window, bypass, factory presets (main ones) and user p
 
 ## Phase 16 — Release
 - [x] App icon, splash, about screen — own icon (`resources/icon/icon.svg` → `icon_1024.png` → `.icns`, an orange "u" + step row, nothing from FL); splash while the engine starts (normal launches only); OPTIONS > About shows version, build date, GPLv3 notice, source link and the third-party licenses
-- [ ] macOS code signing + notarization (Apple Developer account, $99/yr) — `scripts/package-macos.sh` makes an ad-hoc signed DMG today (13 MB, mounts and launches); the Developer ID + notarytool path is written (`resources/entitlements.plist`) but untested until there's an account
+- [ ] macOS code signing + notarization (Apple Developer account, $99/yr) — `scripts/dist.sh` makes an ad-hoc signed DMG today (13 MB, mounts and launches); the Developer ID + notarytool path is written (`resources/entitlements.plist`) but untested until there's an account
 - [ ] Windows installer + code signing — plan in RELEASING.md (Inno Setup / WiX, OV/EV certificate)
 - [x] Crash reporting — local only: crash handler writes `~/Library/untitledstudio/CrashReports/*.txt` (version, OS, backtrace, last 200 log lines); next launch offers View / Copy / Reveal / Dismiss in the same dialog as autosave recovery. No upload yet (hook marked in `Release.h`)
 - [x] Auto-update — update *check* only: JSON feed (`update.json`), once a day in the background, "Version X is available" + Download button; off until a build sets `UNTITLEDSTUDIO_UPDATE_URL` and the feed is hosted (raw GitHub URL works once pushed). No self-installing updates

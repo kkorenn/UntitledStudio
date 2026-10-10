@@ -1,5 +1,5 @@
 # dmgbuild settings for the Untitled Studio installer window.
-# Used by scripts/package-macos.sh:  dmgbuild -s resources/dmg/dmg-settings.py -D app=... -D background=... -D icon=...
+# Used by scripts/dist.sh:  dmgbuild -s resources/dmg/dmg-settings.py -D app=... -D background=... -D icon=...
 # The GPL licence ships inside the app (Contents/Resources/licenses, also shown in Help > About).
 import os
 

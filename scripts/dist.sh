@@ -1,5 +1,6 @@
 #!/bin/bash
-# Builds a Release .app and packs it into dist/UntitledStudio-<version>-macOS.dmg.
+# Builds a Release .app and packs it into the styled installer dist/UntitledStudio-<version>-macOS.dmg.
+#   ./scripts/dist.sh
 # Ad-hoc signed by default. Set DEVELOPER_ID_APP (+ APPLE_ID, TEAM_ID, APP_PASSWORD) for a real,
 # notarized build; see RELEASING.md.
 set -euo pipefail
@@ -10,8 +11,7 @@ APP_NAME="Untitled Studio"
 DMG="dist/UntitledStudio-$VERSION-macOS.dmg"
 STAGE=dist/stage
 
-cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build-release
+./scripts/build.sh release
 
 rm -rf "$STAGE" "$DMG"
 mkdir -p "$STAGE"

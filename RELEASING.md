@@ -9,7 +9,7 @@ and the DMG name. Bump it there, then update `update.json` (see below).
 ## macOS
 
 ```
-scripts/package-macos.sh
+scripts/dist.sh
 ```
 
 builds `build-release/` (Release), copies the app into a staging folder with an `Applications`
@@ -36,7 +36,7 @@ System Settings > Privacy & Security). Fine for testers, not for a public releas
    ```
    DEVELOPER_ID_APP="Developer ID Application: Your Name (TEAMID1234)" \
    APPLE_ID=you@example.com TEAM_ID=TEAMID1234 APP_PASSWORD=xxxx-xxxx-xxxx-xxxx \
-   scripts/package-macos.sh
+   scripts/dist.sh
    ```
 
 The script then signs with the hardened runtime (`--options runtime --timestamp`) and
