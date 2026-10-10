@@ -29,9 +29,10 @@ public:
             addAndMakeVisible (b);
         }
 
-        snapBox.addItemList (snapNames(), 1);
-        snapBox.setSelectedItemIndex (4, juce::dontSendNotification); // Step
-        snapBox.setTooltip ("Snap to grid");
+        snapBox.addItem ("Main", 1);
+        snapBox.addItemList (Studio::snapNames(), 2);
+        snapBox.setSelectedItemIndex (0, juce::dontSendNotification);
+        snapBox.setTooltip ("Snap to grid (Main = follow the main snap in the top bar)");
         addAndMakeVisible (snapBox);
 
         chordBox.addItem ("No chord", 1);
@@ -144,28 +145,16 @@ public:
         return false;
     }
 
+    // Grid in beats; "Main" follows the top bar's main snap, "Line" = steps here.
+    double getSnap() const
+    {
+        const int i = snapBox.getSelectedItemIndex();
+        return studio.snapBeats (i <= 0 ? studio.mainSnap : i - 1, Studio::stepBeats);
+    }
+
 private:
     //==========================================================================
     static constexpr int toolbarHeight = 32, keysWidth = 56, velocityHeight = 70, rowHeight = 13;
-
-    static juce::StringArray snapNames() { return { "(none)", "1/4 step", "1/3 step", "1/2 step", "Step", "1/3 beat", "1/2 beat", "Beat", "Bar" }; }
-
-    double getSnap() const
-    {
-        switch (snapBox.getSelectedItemIndex())
-        {
-            case 0: return 0.0;
-            case 1: return Studio::stepBeats / 4.0;
-            case 2: return Studio::stepBeats / 3.0;
-            case 3: return Studio::stepBeats / 2.0;
-            case 4: return Studio::stepBeats;
-            case 5: return 1.0 / 3.0;
-            case 6: return 0.5;
-            case 7: return 1.0;
-            case 8: return studio.getBarBeats();
-            default: return Studio::stepBeats;
-        }
-    }
 
     double snapFloor (double beat) const { const double s = getSnap(); return s > 0 ? std::floor (beat / s + 1.0e-6) * s : beat; }
     double snapRound (double beat) const { const double s = getSnap(); return s > 0 ? std::round (beat / s) * s : beat; }

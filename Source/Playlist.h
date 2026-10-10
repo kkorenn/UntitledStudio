@@ -35,9 +35,10 @@ public:
             addAndMakeVisible (b);
         }
 
-        snapBox.addItemList ({ "(none)", "Step", "1/2 beat", "Beat", "Bar" }, 1);
-        snapBox.setSelectedItemIndex (4, juce::dontSendNotification);
-        snapBox.setTooltip ("Snap to grid");
+        snapBox.addItem ("Main", 1);
+        snapBox.addItemList (Studio::snapNames(), 2);
+        snapBox.setSelectedItemIndex (0, juce::dontSendNotification);
+        snapBox.setTooltip ("Snap to grid (Main = follow the main snap in the top bar)");
         addAndMakeVisible (snapBox);
 
         viewport.setViewedComponent (&grid, false);
@@ -110,6 +111,13 @@ public:
 
     static juce::String reservedKeys() { return "pbdect"; }
 
+    // Grid in beats; "Main" follows the top bar's main snap, "Line" = bars here.
+    double getSnap() const
+    {
+        const int i = snapBox.getSelectedItemIndex();
+        return studio.snapBeats (i <= 0 ? studio.mainSnap : i - 1, studio.getBarBeats());
+    }
+
     // Drops: sounds from the browser or Finder become audio clips where you drop them.
     bool isInterestedInDragSource (const SourceDetails& d) override { return d.description.toString().startsWith ("file:"); }
     void itemDropped (const SourceDetails& d) override
@@ -126,17 +134,6 @@ public:
 private:
     static constexpr int toolbarHeight = 32, rulerHeight = 22, lanesWidth = 110, laneHeight = 34, numLanes = 64;
 
-    double getSnap() const
-    {
-        switch (snapBox.getSelectedItemIndex())
-        {
-            case 0: return 0.0;
-            case 1: return Studio::stepBeats;
-            case 2: return 0.5;
-            case 3: return 1.0;
-            default: return studio.getBarBeats();
-        }
-    }
 
     static void askNumber (const juce::String& title, const juce::String& message, double value, std::function<void (double)> onOk)
     {

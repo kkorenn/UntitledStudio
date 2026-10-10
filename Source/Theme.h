@@ -115,6 +115,50 @@ namespace Theme
             g.fillPath (pointer, juce::AffineTransform::rotation (angle).translated (centre));
         }
 
+        // Thin FL-style vertical fader (top bar master volume / pitch); other styles stay stock.
+        void drawLinearSlider (juce::Graphics& g, int x, int y, int w, int h, float pos, float minPos, float maxPos,
+                               juce::Slider::SliderStyle style, juce::Slider& s) override
+        {
+            if (style != juce::Slider::LinearVertical)
+                return LookAndFeel_V4::drawLinearSlider (g, x, y, w, h, pos, minPos, maxPos, style, s);
+
+            const auto r = juce::Rectangle<float> ((float) x, (float) y, (float) w, (float) h);
+            const auto slot = r.withSizeKeepingCentre (3.0f, r.getHeight());
+            g.setColour (lcd);
+            g.fillRoundedRectangle (slot.expanded (0.5f), 1.5f);
+
+            const bool bipolar = s.getProperties().getWithDefault ("bipolar", false);
+            const float from = bipolar ? r.getCentreY() : r.getBottom();
+            g.setColour (s.isEnabled() ? accent.withAlpha (0.85f) : textDim);
+            g.fillRect (slot.withY (juce::jmin (from, pos)).withBottom (juce::jmax (from, pos)));
+            if (bipolar)
+            {
+                g.setColour (textDim);
+                g.fillRect (r.withSizeKeepingCentre (r.getWidth() * 0.7f, 1.0f));
+            }
+
+            const auto thumb = juce::Rectangle<float> (r.getWidth() * 0.8f, 6.0f).withCentre ({ r.getCentreX(), pos });
+            g.setColour (outline);
+            g.fillRoundedRectangle (thumb.expanded (0.5f), 1.5f);
+            g.setColour (s.isMouseOverOrDragging() ? text : juce::Colour (0xffb7c0c6));
+            g.fillRoundedRectangle (thumb, 1.5f);
+            g.setColour (outline);
+            g.fillRect (thumb.withSizeKeepingCentre (thumb.getWidth() - 3.0f, 1.0f));
+        }
+
+        int getSliderThumbRadius (juce::Slider& s) override
+        {
+            return s.getSliderStyle() == juce::Slider::LinearVertical ? 3 : LookAndFeel_V4::getSliderThumbRadius (s);
+        }
+
+        // Compact main menu (FILE EDIT ADD ...) on the toolbar colour.
+        juce::Font getMenuBarFont (juce::MenuBarComponent&, int, const juce::String&) override { return font (11.5f, true); }
+        int getMenuBarItemWidth (juce::MenuBarComponent& menuBar, int index, const juce::String& itemText) override
+        {
+            return juce::GlyphArrangement::getStringWidthInt (getMenuBarFont (menuBar, index, itemText), itemText) + 11;
+        }
+        void drawMenuBarBackground (juce::Graphics& g, int, int, bool, juce::MenuBarComponent&) override { g.fillAll (toolbar); }
+
         juce::Font getTextButtonFont (juce::TextButton&, int h) override { return font (juce::jmin (14.0f, (float) h * 0.6f)); }
         juce::Font getPopupMenuFont() override                         { return font (14.0f); }
         juce::Font getLabelFont (juce::Label&) override                { return font (13.0f); }

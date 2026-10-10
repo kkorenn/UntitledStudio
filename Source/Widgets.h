@@ -53,14 +53,24 @@ namespace Widgets
             g.setColour (Theme::lcd);
             g.fillRoundedRectangle (getLocalBounds().toFloat(), 3.0f);
             g.setColour (Theme::lcdText);
-            g.setFont (Theme::font ((float) getHeight() * 0.62f, true));
-            g.drawText (format (value), getLocalBounds().reduced (4, 0), juce::Justification::centred);
+            const auto text = format (value);
+            g.setFont (Theme::font (juce::jmin ((float) getHeight() * 0.62f, (float) (getWidth() - 6) / (0.62f * (float) juce::jmax (4, text.length()))), true));
+            g.drawText (text, getLocalBounds().reduced (4, 0), juce::Justification::centred);
         }
 
-        void mouseDown (const juce::MouseEvent&) override { dragStartValue = value; }
+        // Return true to take the click (e.g. a right-click menu, tap tempo).
+        std::function<bool (const juce::MouseEvent&)> onMouseDown;
+
+        void mouseDown (const juce::MouseEvent& e) override
+        {
+            dragStartValue = value;
+            ignoreDrag = onMouseDown && onMouseDown (e);
+        }
 
         void mouseDrag (const juce::MouseEvent& e) override
         {
+            if (ignoreDrag)
+                return;
             const double fine = e.mods.isCtrlDown() || e.mods.isCommandDown() ? 0.1 : 1.0;
             change (dragStartValue - e.getDistanceFromDragStartY() * step * fine);
         }
@@ -70,7 +80,10 @@ namespace Widgets
             change (value + (w.deltaY > 0 ? step : -step) * 4.0);
         }
 
-        void mouseDoubleClick (const juce::MouseEvent&) override
+        void mouseDoubleClick (const juce::MouseEvent&) override { if (! ignoreDrag) showEditor(); }
+
+        // Type a value.
+        void showEditor()
         {
             editor = std::make_unique<juce::TextEditor>();
             editor->setText (juce::String (value), false);
@@ -105,6 +118,7 @@ namespace Widgets
         }
 
         double value = 0.0, dragStartValue = 0.0;
+        bool ignoreDrag = false;
         const double minValue, maxValue, step;
         std::unique_ptr<juce::TextEditor> editor;
     };

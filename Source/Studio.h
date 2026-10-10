@@ -10,7 +10,7 @@ namespace te = tracktion;
 // FL-style project model, stored as a ValueTree inside the Tracktion Edit so it
 // saves/loads/undoes together with the engine state.
 //
-//   STUDIO (currentPattern, songMode, swing)
+//   STUDIO (currentPattern, songMode, swing, masterPitch semitones)
 //     CHANNELS / CHANNEL (id, name, type, track, file, colour)
 //     PATTERNS / PATTERN (id, name, colour) / NOTE (channel, start, length, key, velocity)
 //     INSERTS / INSERT  (index, name, track)  -- mixer inserts; index 0 = master
@@ -36,7 +36,7 @@ namespace IDs
     STUDIO_ID (POINT) STUDIO_ID (pos) STUDIO_ID (value) STUDIO_ID (tension) STUDIO_ID (plugin) STUDIO_ID (param)
     STUDIO_ID (MAPPINGS) STUDIO_ID (MAP) STUDIO_ID (cc)
     STUDIO_ID (TEMPOS) STUDIO_ID (TEMPOCHANGE) STUDIO_ID (bpm) STUDIO_ID (stretch) STUDIO_ID (pitch) STUDIO_ID (origBpm)
-    STUDIO_ID (arp) STUDIO_ID (arpRate) STUDIO_ID (arpOctaves) STUDIO_ID (arpGate)
+    STUDIO_ID (arp) STUDIO_ID (arpRate) STUDIO_ID (arpOctaves) STUDIO_ID (arpGate) STUDIO_ID (masterPitch)
    #undef STUDIO_ID
 }
 
@@ -587,6 +587,24 @@ public:
         captureNote (m);
     }
 
+    // FL step edit: while stopped, played notes are written at the playhead, which then
+    // moves on one step once every key is released (so chords land on one step).
+    bool stepEdit = false;
+
+    void stepEditNote (const juce::MidiMessage& m)
+    {
+        if (m.isNoteOn())
+        {
+            if (stepKeysHeld++ == 0)
+                undo().beginNewTransaction ("Step edit");
+            addNote (getCurrentPatternState(), selectedChannel, getPositionBeats(), stepBeats, m.getNoteNumber(), m.getVelocity());
+        }
+        else if (stepKeysHeld > 0 && --stepKeysHeld == 0)
+        {
+            setPositionBeats (getPositionBeats() + stepBeats);
+        }
+    }
+
     //==========================================================================
     // Recording (FL: arm the record button, then play).
 
@@ -594,6 +612,9 @@ public:
     {
         bool audio = true, notes = true, automation = true;
         bool countIn = true, punch = false, monitorInput = false;
+        bool waitForInput = false; // armed + play waits for the first note
+        bool blend = true;         // off: recording notes replaces the channel's notes in the pattern
+        bool loopRecord = true;    // off: no looping while recording, the pattern grows instead
     };
 
     RecordOptions recordOptions;
@@ -605,6 +626,7 @@ public:
     }
 
     bool isRecording() const { return recording; }
+    bool isWaitingForInput() const { return waitingForInput; }
     bool recordArmed = false;
 
     void startRecording()
@@ -618,8 +640,12 @@ public:
         pendingNotes.clear();
         recordStartBeats = isSongMode() ? std::floor (getPositionBeats() / getBarBeats()) * getBarBeats() : 0.0;
         recordPattern = {};
+        replacedNotes = false;
+        updateLooping();
 
-        edit->setCountInMode (recordOptions.countIn ? te::Edit::CountIn::oneBar : te::Edit::CountIn::none);
+        const bool waited = std::exchange (waitingForInput, false); // started by a played note: no count-in
+        const bool countIn = recordOptions.countIn && ! waited;
+        edit->setCountInMode (countIn ? te::Edit::CountIn::oneBar : te::Edit::CountIn::none);
         edit->recordingPunchInOut = recordOptions.punch && getSongLoop().getLength() > 0.0;
 
         undo().beginNewTransaction ("Record");
@@ -655,6 +681,7 @@ public:
         recording = false;
         transport().stop (false, false);
         setRecordingAutomation (false);
+        updateLooping();
 
         // Notes still held when stopping end now.
         for (auto& [key, held] : pendingNotes)
@@ -717,11 +744,15 @@ public:
     // Notes from the typing keyboard, on-screen keys and MIDI keyboards while recording.
     void captureNote (const juce::MidiMessage& m)
     {
+        if (waitingForInput && m.isNoteOn())
+            startRecording();
+        if (stepEdit && ! isPlaying() && ! recording)
+            return stepEditNote (m);
         if (! recording || ! recordOptions.notes || ! transport().isPlaying() || ! (m.isNoteOn() || m.isNoteOff()))
             return;
 
         double pos = getPositionBeats();
-        if (! isSongMode())
+        if (! isSongMode() && transport().looping)
             pos = std::fmod (pos, juce::jmax (1.0e-3, loopEndBeats));
 
         const int key = m.getNoteNumber();
@@ -758,6 +789,11 @@ public:
 
         if (start - offset < 0.0)
             return;
+
+        if (! recordOptions.blend && ! std::exchange (replacedNotes, true))
+            for (int i = pattern.getNumChildren(); --i >= 0;)
+                if ((int) pattern.getChild (i)[IDs::channel] == selectedChannel)
+                    pattern.removeChild (i, &undo());
 
         addNote (pattern, selectedChannel, start - offset, juce::jmax (1.0 / 64.0, length), key, juce::jlimit (1, 127, velocity));
         if (recordPattern.isValid())
@@ -1207,6 +1243,9 @@ public:
 
     void userChangedParam (te::AutomatableParameter& param)
     {
+        if (param.getPlugin() != nullptr)
+            lastTweaked = { param.getPlugin()->itemID.toVar(), param.paramID };
+
         if (! recordAutomation || ! isPlaying() || ! isSongMode() || param.getPlugin() == nullptr)
             return;
 
@@ -1241,6 +1280,9 @@ public:
 
     //==========================================================================
     // MIDI controller links (FL "Link to controller")
+
+    // FL "Tools > Last tweaked": the last control the user moved.
+    te::AutomatableParameter* getLastTweaked() const { return findParam (lastTweaked.first, lastTweaked.second); }
 
     void startLearning (te::AutomatableParameter& param) { learning = &param; }
     bool isLearning (te::AutomatableParameter& param) const { return learning == &param; }
@@ -1427,7 +1469,12 @@ public:
     void togglePlay()
     {
         auto& t = transport();
-        if (t.isPlaying() || recording)
+        if (waitingForInput)
+        {
+            waitingForInput = false;
+            t.setPosition (0s);
+        }
+        else if (t.isPlaying() || recording)
         {
             if (recording) stopRecording();
             else           t.stop (false, false);
@@ -1435,13 +1482,56 @@ public:
         }
         else if (recordArmed)
         {
-            startRecording();
+            if (recordOptions.waitForInput) waitingForInput = true;
+            else                            startRecording();
         }
         else
         {
             regenerateNow();
             t.play (false);
         }
+    }
+
+    // FL play button while playing: pause (stop where we are).
+    void pause()
+    {
+        waitingForInput = false;
+        if (recording) stopRecording();
+        else           transport().stop (false, false);
+    }
+
+    // FL stop button: stop and go back to the start.
+    void stop()
+    {
+        pause();
+        transport().setPosition (0s);
+    }
+
+    // Loop the pattern / song loop region (FL's loop toggle). Recording follows "loop recording".
+    bool isLoopPlayback() const          { return loopPlayback; }
+    void setLoopPlayback (bool on)       { loopPlayback = on; updateLooping(); }
+    void updateLooping()                 { transport().looping = loopPlayback && (! recording || recordOptions.loopRecord); }
+
+    // FL master pitch: transposes every generator channel (not audio clips or drum pads), in semitones.
+    int getMasterPitch() const           { return studio[IDs::masterPitch]; }
+    void setMasterPitch (int semitones)  { studio.setProperty (IDs::masterPitch, juce::jlimit (-12, 12, semitones), &undo()); }
+
+    // FL main snap: the playlist and piano roll use it when their snap is set to "Main".
+    // "Line" = each window's natural grid (bars in the playlist, steps in the piano roll).
+    static juce::StringArray snapNames() { return { "Line", "(none)", "1/4 step", "1/3 step", "1/2 step", "Step", "1/3 beat", "1/2 beat", "Beat", "Bar" }; }
+    int mainSnap = 0;
+    double snapBeats (int index, double lineBeats) const
+    {
+        const double values[] = { lineBeats, 0.0, stepBeats / 4.0, stepBeats / 3.0, stepBeats / 2.0, stepBeats, 1.0 / 3.0, 0.5, 1.0, getBarBeats() };
+        return juce::isPositiveAndBelow (index, (int) std::size (values)) ? values[index] : lineBeats;
+    }
+
+    // Snaps the current pattern's note starts to `grid` beats (FL Tools > Quantize).
+    void quantizePattern (double grid)
+    {
+        undo().beginNewTransaction ("Quantize");
+        for (auto n : getCurrentPatternState())
+            n.setProperty (IDs::start, std::round ((double) n[IDs::start] / grid) * grid, &undo());
     }
 
     double getPositionBeats() const
@@ -1506,6 +1596,8 @@ private:
         for (auto& fn : editAboutToChange)
             fn();
         learning = nullptr;
+        lastTweaked = {};
+        waitingForInput = false;
         automatedTargets.clear();
 
         if (edit != nullptr)
@@ -1519,7 +1611,7 @@ private:
         edit->getUndoManager().addChangeListener (this);
         ++editGeneration;
         edit->getTransport().ensureContextAllocated();
-        edit->getTransport().looping = true;
+        edit->getTransport().looping = loopPlayback;
 
         studio = edit->state.getOrCreateChildWithName (IDs::STUDIO, nullptr);
         for (auto type : { IDs::CHANNELS, IDs::PATTERNS, IDs::PLAYLIST, IDs::INSERTS, IDs::MAPPINGS, IDs::TEMPOS })
@@ -1897,6 +1989,10 @@ private:
                 }
             }
 
+            if (const int pitch = getMasterPitch(); pitch != 0 && channel[IDs::type].toString() != ChannelType::drumpad)
+                for (auto& n : notes)
+                    n.key = juce::jlimit (0, 127, n.key + pitch);
+
             writeNotes (clip->getSequence(), notes);
 
             if (channel[IDs::type].toString() == ChannelType::audio)
@@ -1973,7 +2069,9 @@ private:
     juce::StringArray missingFiles;
     std::set<juce::String> automatedTargets;
     te::AutomatableParameter* learning = nullptr;
-    bool recordAutomation = false, recording = false;
+    bool recordAutomation = false, recording = false, waitingForInput = false, replacedNotes = false, loopPlayback = true;
+    int stepKeysHeld = 0;
+    std::pair<juce::var, juce::String> lastTweaked;
     double recordStartBeats = 0.0;
     juce::ValueTree recordPattern;
     std::map<int, std::pair<double, int>> pendingNotes;

@@ -213,6 +213,14 @@ namespace Exporter
             setSize (420, 330);
         }
 
+        // FILE > Export presets: what = 0 mixdown, 1 stems, 2 MIDI.
+        void preset (int what, Format format)
+        {
+            whatBox.setSelectedItemIndex (what);
+            formatBox.setSelectedItemIndex ((int) format);
+            updateEnabled();
+        }
+
         void paint (juce::Graphics& g) override
         {
             g.fillAll (Theme::panelDark);

@@ -98,8 +98,8 @@ namespace Effects
     }
 
     // Menu of effects grouped by category; calls onPick with the xml type.
-    inline void showAddMenu (juce::Component& target, std::function<void (const juce::String&)> onPick,
-                             const juce::Array<juce::PluginDescription>& externalEffects = {})
+    inline juce::PopupMenu addMenu (std::function<void (const juce::String&)> onPick,
+                                    const juce::Array<juce::PluginDescription>& externalEffects = {})
     {
         juce::PopupMenu m;
         juce::StringArray order { "Mixing", "Space", "Color", "Modulation", "Filter", "Pitch", "Utility" };
@@ -130,7 +130,13 @@ namespace Effects
         for (auto& d : externalEffects)
             plugins.addItem (d.name + "  (" + d.manufacturerName + ")", [onPick, id = d.createIdentifierString()] { onPick ("ext:" + id); });
         m.addSubMenu ("Plugins (VST3 / AU)", plugins, ! externalEffects.isEmpty());
-        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (target));
+        return m;
+    }
+
+    inline void showAddMenu (juce::Component& target, std::function<void (const juce::String&)> onPick,
+                             const juce::Array<juce::PluginDescription>& externalEffects = {})
+    {
+        addMenu (std::move (onPick), externalEffects).showMenuAsync (juce::PopupMenu::Options().withTargetComponent (target));
     }
 
     inline juce::String displayName (te::Plugin& p)
