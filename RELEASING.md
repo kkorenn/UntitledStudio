@@ -15,6 +15,11 @@ scripts/package-macos.sh
 builds `build-release/` (Release), copies the app into a staging folder with an `Applications`
 link and `LICENSE.txt`, signs it, and writes `dist/UntitledStudio-<version>-macOS.dmg` (about 13 MB).
 
+The installer window is styled: `resources/dmg/background.svg` (version stamped in, rendered 1x + 2x
+with `rsvg-convert`, `brew install librsvg`) and `resources/dmg/dmg-settings.py` (window size, icon
+positions, disk icon). `dmgbuild` (MIT, build tool only, not shipped) is installed automatically into
+`build-release/dmg-venv` and writes Finder's layout directly, so no Finder scripting is needed.
+
 ### Without an Apple Developer account (default)
 
 The app is **ad-hoc signed** (`codesign -s -`). It runs on the machine that built it; on other Macs

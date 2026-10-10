@@ -17,7 +17,6 @@ rm -rf "$STAGE" "$DMG"
 mkdir -p "$STAGE"
 cp -R "build-release/UntitledStudio_artefacts/Release/$APP_NAME.app" "$STAGE/"
 cp LICENSE "$STAGE/LICENSE.txt"
-ln -s /Applications "$STAGE/Applications"
 APP="$STAGE/$APP_NAME.app"
 
 if [[ -z "${DEVELOPER_ID_APP:-}" ]]; then
@@ -31,7 +30,25 @@ else
 fi
 codesign --verify --deep --strict "$APP"
 
-hdiutil create -volname "$APP_NAME $VERSION" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+# Styled installer window (background, icon layout, disk icon) via dmgbuild, which writes
+# Finder's layout file directly (no Finder scripting needed). Lives in a private venv.
+VENV=build-release/dmg-venv
+if [[ ! -x "$VENV/bin/dmgbuild" ]]; then
+    python3 -m venv "$VENV"
+    "$VENV/bin/pip" install --quiet dmgbuild
+fi
+
+ART="$STAGE/.art"
+mkdir -p "$ART"
+sed "s/{{VERSION}}/$VERSION/" resources/dmg/background.svg > "$ART/background.svg"
+rsvg-convert -w 660 -h 420 "$ART/background.svg" -o "$ART/background.png"
+rsvg-convert -w 1320 -h 840 "$ART/background.svg" -o "$ART/background@2x.png"
+tiffutil -cathidpicheck "$ART/background.png" "$ART/background@2x.png" -out "$ART/background.tiff" 2>/dev/null
+
+"$VENV/bin/dmgbuild" -s resources/dmg/dmg-settings.py \
+    -D app="$APP" -D license="$STAGE/LICENSE.txt" \
+    -D background="$ART/background.tiff" -D icon="$APP/Contents/Resources/AppIcon.icns" \
+    "$APP_NAME" "$DMG"
 rm -rf "$STAGE"
 
 if [[ -n "${DEVELOPER_ID_APP:-}" ]]; then
