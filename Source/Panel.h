@@ -173,18 +173,18 @@ public:
 
         if (onTitle && ! isMaximised())
         {
+            // Screen-based: the panel also listens to its own events, so each drag can arrive twice;
+            // start + mouse offset gives the same answer however often it runs (no jumping).
             draggingTitle = true;
-            dragger.startDraggingComponent (this, e.getEventRelativeTo (this));
+            dragStartPos = getPosition();
+            dragStartMouse = e.getScreenPosition();
         }
     }
 
     void mouseDrag (const juce::MouseEvent& e) override
     {
         if (draggingTitle)
-        {
-            dragger.dragComponent (this, e.getEventRelativeTo (this), &constrainer);
-            snap();
-        }
+            setTopLeftPosition (snapped (dragStartPos + (e.getScreenPosition() - dragStartMouse)));
     }
 
     void mouseUp (const juce::MouseEvent& e) override
@@ -257,12 +257,13 @@ private:
         m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition());
     }
 
-    // Snap the edges to the workspace edges and to other windows within a few pixels.
-    void snap()
+    // Snaps a proposed position's edges to the workspace edges and other windows (within a few pixels),
+    // and keeps the title bar reachable inside the workspace.
+    juce::Point<int> snapped (juce::Point<int> pos) const
     {
         auto* parent = getParentComponent();
         if (parent == nullptr)
-            return;
+            return pos;
 
         juce::Array<int> xs { 0, parent->getWidth() }, ys { 0, parent->getHeight() };
         for (auto* c : parent->getChildren())
@@ -284,7 +285,10 @@ private:
                     }
             return shift;
         };
-        setTopLeftPosition (getX() + best (xs, getX(), getRight()), getY() + best (ys, getY(), getBottom()));
+        pos += { best (xs, pos.x, pos.x + getWidth()), best (ys, pos.y, pos.y + getHeight()) };
+        pos.x = juce::jlimit (60 - getWidth(), parent->getWidth() - 60, pos.x);
+        pos.y = juce::jlimit (0, juce::jmax (0, parent->getHeight() - titleHeight), pos.y);
+        return pos;
     }
 
     juce::Rectangle<int> getCloseArea() const { return { getWidth() - titleHeight, 0, titleHeight, titleHeight }; }
@@ -292,7 +296,7 @@ private:
     juce::String title;
     std::unique_ptr<juce::Component> content;
     std::unique_ptr<DetachedWindow> detached; // after content: destroyed first
-    juce::ComponentDragger dragger;
+    juce::Point<int> dragStartPos, dragStartMouse;
     juce::ComponentBoundsConstrainer constrainer;
     juce::ResizableCornerComponent resizer { this, &constrainer };
     juce::Rectangle<int> restoreBounds;
