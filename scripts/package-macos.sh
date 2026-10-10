@@ -16,7 +16,6 @@ cmake --build build-release
 rm -rf "$STAGE" "$DMG"
 mkdir -p "$STAGE"
 cp -R "build-release/UntitledStudio_artefacts/Release/$APP_NAME.app" "$STAGE/"
-cp LICENSE "$STAGE/LICENSE.txt"
 APP="$STAGE/$APP_NAME.app"
 
 if [[ -z "${DEVELOPER_ID_APP:-}" ]]; then
@@ -46,7 +45,7 @@ rsvg-convert -w 1320 -h 840 "$ART/background.svg" -o "$ART/background@2x.png"
 tiffutil -cathidpicheck "$ART/background.png" "$ART/background@2x.png" -out "$ART/background.tiff" 2>/dev/null
 
 "$VENV/bin/dmgbuild" -s resources/dmg/dmg-settings.py \
-    -D app="$APP" -D license="$STAGE/LICENSE.txt" \
+    -D app="$APP" \
     -D background="$ART/background.tiff" -D icon="$APP/Contents/Resources/AppIcon.icns" \
     "$APP_NAME" "$DMG"
 rm -rf "$STAGE"
