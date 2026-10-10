@@ -43,7 +43,7 @@
   <!-- arrow from the app to Applications -->
   <g fill="none" stroke="url(#mark)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
     <path d="M 258 186 C 298 156, 362 156, 402 186"/>
-    <path d="M 384 171 L 404 187 L 381 197"/>
+    <path d="M 397.8 168.5 L 404 187.5 L 384 186.9" stroke="#f07a1e"/>
   </g>
 
   <!-- step-sequencer row, two steps lit -->
