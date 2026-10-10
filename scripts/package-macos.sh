@@ -40,8 +40,8 @@ fi
 ART="$STAGE/.art"
 mkdir -p "$ART"
 sed "s/{{VERSION}}/$VERSION/" resources/dmg/background.svg > "$ART/background.svg"
-rsvg-convert -w 660 -h 420 "$ART/background.svg" -o "$ART/background.png"
-rsvg-convert -w 1320 -h 840 "$ART/background.svg" -o "$ART/background@2x.png"
+rsvg-convert -w 660 -h 560 "$ART/background.svg" -o "$ART/background.png"
+rsvg-convert -w 1320 -h 1120 "$ART/background.svg" -o "$ART/background@2x.png"
 tiffutil -cathidpicheck "$ART/background.png" "$ART/background@2x.png" -out "$ART/background.tiff" 2>/dev/null
 
 "$VENV/bin/dmgbuild" -s resources/dmg/dmg-settings.py \

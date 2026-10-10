@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Untitled Studio installer (DMG) window background, 660x420. Original artwork.
+<!-- Untitled Studio installer (DMG) window background, 660x560 (artwork in the top 420; the rest is margin that newer Finder
+     versions cover with their toolbar / path bar / status bar). Original artwork.
      scripts/package-macos.sh replaces {{VERSION}} and renders 1x + 2x.
      Finder draws icon labels in black, so the icons sit on a light card. -->
-<svg xmlns="http://www.w3.org/2000/svg" width="660" height="420" viewBox="0 0 660 420">
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="560" viewBox="0 0 660 560">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#353d43"/>
@@ -25,8 +26,8 @@
     </filter>
   </defs>
 
-  <rect width="660" height="420" fill="url(#bg)"/>
-  <rect width="660" height="420" fill="url(#grid)"/>
+  <rect width="660" height="560" fill="url(#bg)"/>
+  <rect width="660" height="560" fill="url(#grid)"/>
 
   <!-- header -->
   <g transform="translate(36 26)">

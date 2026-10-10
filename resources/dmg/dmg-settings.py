@@ -11,9 +11,11 @@ size = None
 files = [app]
 symlinks = {"Applications": "/Applications"}
 icon = defines["icon"]                 # disk icon on the desktop / in Finder's sidebar
-background = defines["background"]     # 1x + 2x TIFF, 660x420 points
+background = defines["background"]     # 1x + 2x TIFF, 660x560 points
 
-window_rect = ((200, 140), (660, 420))
+# Newer Finder versions draw the toolbar, path bar and status bar even when asked not to (~140 pt),
+# so the window is taller than the 420 pt of artwork; the background continues below it.
+window_rect = ((200, 100), (660, 560))
 default_view = "icon-view"
 show_status_bar = False
 show_tab_view = False
